@@ -69,6 +69,30 @@ Also: `build-app.sh` (assembles + ad-hoc-signs `dist/GraphingApp.app`), `Package
   `.md` and `.csv` files both get boxes (`AppModel.boxableExts`); new in-app files are still `.md`.
   Bodies can still be edited in Obsidian too.
 
+## Code style — minimal *and* legible
+The `ponytail` plugin (installed) governs **how much code exists**; this governs **what it's named and
+how it reads**. Same goal — least cognitive load for the next engineer — different axes, so they
+complement. **Target: the shortest code that still reads like a description of the system's behavior.**
+
+When the two pull against each other, resolve in this order:
+- **Cut quantity, never clarity.** "One line over fifty" holds only while the line stays legible.
+  Don't golf, and never trade an intent-revealing name for fewer characters.
+- **A clear name is a legitimate reason to extract a function** — naming, not speculative abstraction
+  (which ponytail still forbids). Prefer the fewest *well-named* units, not the fewest units.
+- **Terse locals are where they already agree:** `dx`, `dy`, `index`, `i` in a small math/iteration
+  scope are correct — don't inflate them to `horizontalTranslationDistance`.
+
+Naming:
+- Names state **intent**, not implementation. Functions = actions (`createCustomerInvoice()`), types =
+  entities (`BoardNode`), variables = the meaning of the data. Matches the existing code (`effectiveFrame`,
+  `syncFromDisk`, `worldToScreen`) — keep that bar.
+- No abbreviations unless universal in the domain; no single letters outside small math/loop scopes.
+- **Banned generic names:** `data`, `value`, `item`, `thing`, `temp`, `obj`, `helper`, `manager`,
+  `util`, `process`, `handle`.
+- If a name needs a comment to say what it means, the name is wrong — lengthen the name, drop the comment.
+- Comments explain **why** (business rule, constraint, tradeoff, edge case, the non-obvious decision),
+  never restate the code.
+
 ## Working agreement (how we run this long-term)
 Tracked scrum-style. **Every session:**
 1. **Start** — read `docs/HANDOFF.md` (where we left off) and `docs/BACKLOG.md` (current sprint + priorities).
