@@ -350,6 +350,7 @@ final class AppModel: ObservableObject {
     static let folderPadding: CGFloat = 18
     static let folderMinSize = CGSize(width: 200, height: 150)
     static let noteMinSize = CGSize(width: 110, height: 52)
+    static let gridStep: CGFloat = 48   // canvas dot-grid spacing; box resize snaps the dragged corner to it
 
     /// File extensions that get a box on the canvas (besides folders). New files made *in* the app
     /// are still `.md`; other types appear when present on disk (spreadsheets, source code, etc.).
@@ -682,6 +683,21 @@ final class AppModel: ObservableObject {
         return frame
     }
 
+    /// The rectangle a folder must cover to enclose its direct contents (children's displayed
+    /// bounds + padding + header), or nil when empty. Same region `effectiveFrame` auto-grows into;
+    /// the resize clamp uses it so a folder can't be drawn smaller than what it holds.
+    func contentsBounds(of node: BoardNode) -> CGRect? {
+        let children = directChildren(of: node.relPath)
+        guard let first = children.first else { return nil }
+        var bounds = effectiveFrame(of: first)
+        for child in children.dropFirst() { bounds = bounds.union(effectiveFrame(of: child)) }
+        let pad = AppModel.folderPadding
+        return CGRect(x: bounds.minX - pad,
+                      y: bounds.minY - pad - AppModel.folderHeaderHeight,
+                      width: bounds.width + 2 * pad,
+                      height: bounds.height + 2 * pad + AppModel.folderHeaderHeight)
+    }
+
     /// Log a folder-graph cycle at most once every 5s (this path can fire every frame).
     private func warnFolderCycle(at relPath: String, depth: Int) {
         let now = Date()
@@ -974,11 +990,6 @@ final class AppModel: ObservableObject {
         let x = folder.x - folder.width / 2 + 56 + CGFloat(count % 3) * 150
         let y = folder.y - folder.height / 2 + 70 + CGFloat(count / 3) * 84
         return addNote(inDir: folder.relPath, at: CGPoint(x: x, y: y))
-    }
-
-    /// Boxes that live inside the given folder (any depth) — used to drag a folder's contents with it.
-    func descendants(ofFolder relPath: String) -> [BoardNode] {
-        board.nodes.filter { $0.relPath.hasPrefix(relPath + "/") }
     }
 
     func rename(_ id: UUID, to newName: String) {
@@ -1276,25 +1287,24 @@ final class AppModel: ObservableObject {
         return ids
     }
 
-    /// Resize a folder as a group/frame: scale every descendant box's position AND size about the
-    /// fixed (`anchor`) corner so the contents keep their relative layout. `childStart` is each
-    /// descendant's frame snapshotted at the gesture start, so repeated calls during a drag stay
-    /// idempotent (no cumulative drift). Notes have no descendants, so this just resizes the box.
-    func applyFolderResize(_ id: UUID, newFrame: CGRect, oldFrame old: CGRect,
-                           anchor: CGPoint, childStart: [UUID: CGRect]) {
-        guard let idx = board.nodes.firstIndex(where: { $0.id == id }) else { return }
-        let sx = old.width  > 0 ? newFrame.width  / old.width  : 1
-        let sy = old.height > 0 ? newFrame.height / old.height : 1
-        for (cid, f) in childStart {
-            guard let ci = board.nodes.firstIndex(where: { $0.id == cid }) else { continue }
-            board.nodes[ci].width  = f.width  * sx
-            board.nodes[ci].height = f.height * sy
-            board.nodes[ci].center = CGPoint(x: anchor.x + (f.midX - anchor.x) * sx,
-                                             y: anchor.y + (f.midY - anchor.y) * sy)
+    /// Build a resized frame from a fixed `anchor` corner and the dragged corner (`sign` is the
+    /// drag's direction from the anchor, ±1 per axis). Clamps so the box never goes below `minSize`
+    /// and — for a folder with contents — never shrinks past the children it holds. Resizing a
+    /// folder moves only its own frame; the contents stay put (no rescaling).
+    func resizedFrame(for node: BoardNode, anchor: CGPoint, drag rawDrag: CGPoint,
+                      sign: CGVector, minSize: CGSize) -> CGRect {
+        // Keep the dragged corner on its own side of the anchor (never flip past it).
+        var drag = CGPoint(x: sign.dx > 0 ? max(rawDrag.x, anchor.x) : min(rawDrag.x, anchor.x),
+                           y: sign.dy > 0 ? max(rawDrag.y, anchor.y) : min(rawDrag.y, anchor.y))
+        if node.kind == .folder, let cb = contentsBounds(of: node) {
+            if sign.dx > 0 { drag.x = max(drag.x, cb.maxX) } else { drag.x = min(drag.x, cb.minX) }
+            if sign.dy > 0 { drag.y = max(drag.y, cb.maxY) } else { drag.y = min(drag.y, cb.minY) }
         }
-        board.nodes[idx].width = newFrame.width
-        board.nodes[idx].height = newFrame.height
-        board.nodes[idx].center = CGPoint(x: newFrame.midX, y: newFrame.midY)
+        // Enforce the minimum size, growing away from the fixed anchor.
+        if abs(drag.x - anchor.x) < minSize.width  { drag.x = anchor.x + sign.dx * minSize.width }
+        if abs(drag.y - anchor.y) < minSize.height { drag.y = anchor.y + sign.dy * minSize.height }
+        return CGRect(x: min(anchor.x, drag.x), y: min(anchor.y, drag.y),
+                      width: abs(drag.x - anchor.x), height: abs(drag.y - anchor.y))
     }
 
     /// Set (or clear, when `color == nil`) the accent of one or more boxes. Undoable.

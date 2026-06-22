@@ -279,7 +279,7 @@ struct CanvasView: View {
 
     private var grid: some View {
         Canvas { ctx, size in
-            let spacing = 48 * model.zoom
+            let spacing = AppModel.gridStep * model.zoom
             guard spacing > 9 else { return }
             let startX = model.pan.width.truncatingRemainder(dividingBy: spacing)
             let startY = model.pan.height.truncatingRemainder(dividingBy: spacing)
@@ -985,7 +985,6 @@ struct ResizeHandle: View {
     let node: BoardNode
     let corner: Corner
     @State private var startFrame: CGRect?
-    @State private var childStart: [UUID: CGRect] = [:]   // descendant frames at drag start (folders)
 
     var body: some View {
         RoundedRectangle(cornerRadius: 3)
@@ -999,43 +998,26 @@ struct ResizeHandle: View {
                     .onChanged { v in
                         if startFrame == nil {
                             startFrame = model.effectiveFrame(of: node)
-                            if node.kind == .folder {
-                                childStart = Dictionary(uniqueKeysWithValues:
-                                    model.descendants(ofFolder: node.relPath).map { ($0.id, $0.frame) })
-                            }
                             model.beginInteraction()
                         }
                         guard let s = startFrame else { return }
                         let dx = v.translation.width / model.zoom
                         let dy = v.translation.height / model.zoom
-                        var minX = s.minX, minY = s.minY, maxX = s.maxX, maxY = s.maxY
+                        let grid = AppModel.gridStep
+                        func snap(_ p: CGFloat) -> CGFloat { (p / grid).rounded() * grid }
+                        // Opposite corner is the fixed anchor; the dragged corner moves by (dx,dy),
+                        // snapped to the dot grid. `sign` is the drag's direction from the anchor.
+                        let anchor: CGPoint, sign: CGVector, drag: CGPoint
                         switch corner {
-                        case .topLeft:     minX += dx; minY += dy
-                        case .topRight:    maxX += dx; minY += dy
-                        case .bottomLeft:  minX += dx; maxY += dy
-                        case .bottomRight: maxX += dx; maxY += dy
+                        case .topLeft:     anchor = CGPoint(x: s.maxX, y: s.maxY); sign = CGVector(dx: -1, dy: -1); drag = CGPoint(x: snap(s.minX + dx), y: snap(s.minY + dy))
+                        case .topRight:    anchor = CGPoint(x: s.minX, y: s.maxY); sign = CGVector(dx:  1, dy: -1); drag = CGPoint(x: snap(s.maxX + dx), y: snap(s.minY + dy))
+                        case .bottomLeft:  anchor = CGPoint(x: s.maxX, y: s.minY); sign = CGVector(dx: -1, dy:  1); drag = CGPoint(x: snap(s.minX + dx), y: snap(s.maxY + dy))
+                        case .bottomRight: anchor = CGPoint(x: s.minX, y: s.minY); sign = CGVector(dx:  1, dy:  1); drag = CGPoint(x: snap(s.maxX + dx), y: snap(s.maxY + dy))
                         }
                         let minSize = node.kind == .folder ? AppModel.folderMinSize : AppModel.noteMinSize
-                        let w = max(minSize.width, maxX - minX)
-                        let h = max(minSize.height, maxY - minY)
-                        // The opposite corner stays put (anchor); the frame grows/shrinks toward it.
-                        let ox: CGFloat, oy: CGFloat, anchor: CGPoint
-                        switch corner {
-                        case .topLeft:     ox = s.maxX - w; oy = s.maxY - h; anchor = CGPoint(x: s.maxX, y: s.maxY)
-                        case .topRight:    ox = s.minX;     oy = s.maxY - h; anchor = CGPoint(x: s.minX, y: s.maxY)
-                        case .bottomLeft:  ox = s.maxX - w; oy = s.minY;     anchor = CGPoint(x: s.maxX, y: s.minY)
-                        case .bottomRight: ox = s.minX;     oy = s.minY;     anchor = CGPoint(x: s.minX, y: s.minY)
-                        }
-                        let newFrame = CGRect(x: ox, y: oy, width: w, height: h)
-                        if node.kind == .folder {
-                            // Group resize: scale the folder's contents to keep their relative layout.
-                            model.applyFolderResize(node.id, newFrame: newFrame, oldFrame: s,
-                                                    anchor: anchor, childStart: childStart)
-                        } else {
-                            model.setFrame(node.id, newFrame)
-                        }
+                        model.setFrame(node.id, model.resizedFrame(for: node, anchor: anchor, drag: drag, sign: sign, minSize: minSize))
                     }
-                    .onEnded { _ in startFrame = nil; childStart = [:]; model.endInteraction() }
+                    .onEnded { _ in startFrame = nil; model.endInteraction() }
             )
     }
 }
