@@ -330,6 +330,16 @@ final class AppModel: ObservableObject {
     /// Input-only (not @Published — it never affects rendering).
     var scrollOverCard: Bool?
 
+    // MARK: Live file-watching (the read side of the living canvas)
+
+    /// Bumps whenever a watched file's content may have changed (our own write or an external edit in
+    /// Obsidian / by an agent). Open content cards & peeks observe this and re-read from disk.
+    @Published private(set) var diskRevision = 0
+    private var watcher: VaultWatcher?
+    /// Vault-relative paths the app itself just wrote, with the time of the write — so the watcher can
+    /// tell our own echo from a genuine external change and not loop or re-sync needlessly.
+    private var selfWrites: [String: Date] = [:]
+
     private let defaultsKey = "vaultPath"
 
     // Default box sizes
@@ -449,13 +459,55 @@ final class AppModel: ObservableObject {
         clearHistory()
         syncFromDisk()
         didInitView = false
+        startWatching()
     }
 
     func closeVault() {
+        stopWatching()
         vault = nil
         board = BoardData()
         selection = []
         UserDefaults.standard.removeObject(forKey: defaultsKey)
+    }
+
+    /// Begin (or restart) watching the open vault for external file changes.
+    private func startWatching() {
+        watcher = nil   // releasing the old watcher stops its stream (deinit)
+        guard let vault else { return }
+        watcher = VaultWatcher(root: vault.root) { [weak self] rels in
+            Task { @MainActor in self?.handleDiskChange(rels) }
+        }
+    }
+
+    private func stopWatching() { watcher = nil }
+
+    /// Record that the app itself just wrote `rel`, so the watcher's echo of that write is recognized
+    /// as ours (not an external edit). Called from every raw disk op.
+    private func markSelfWrite(_ rel: String) {
+        guard !rel.isEmpty else { return }
+        selfWrites[rel] = Date()
+    }
+
+    /// True if the app wrote `rel` within the suppression window (covers FSEvents latency + debounce).
+    private func isRecentSelfWrite(_ rel: String) -> Bool {
+        guard let when = selfWrites[rel] else { return false }
+        return Date().timeIntervalSince(when) < 2
+    }
+
+    /// React to a debounced batch of changed vault-relative paths from the watcher.
+    func handleDiskChange(_ rels: [String]) {
+        guard vault != nil else { return }
+        let relevant = rels.filter { !$0.hasPrefix(".graphingapp") }   // our own board.json isn't content
+        guard !relevant.isEmpty else { return }
+        // Any content change (ours or external) → open cards/peeks re-read. The views guard against
+        // clobbering an in-progress edit; re-reading after our own link-write is what makes a drawn
+        // connector's `[[link]]` appear live in the source note's card.
+        diskRevision &+= 1
+        // Reconcile structure (new/deleted/moved boxes) only for EXTERNAL changes — our own
+        // create/move/trash already updated the board in its transaction — and never mid-interaction,
+        // so a drag/resize isn't yanked out from under the user.
+        let hasExternal = relevant.contains { !isRecentSelfWrite($0) }
+        if hasExternal, interactionBefore == nil { syncFromDisk() }
     }
 
     var vaultName: String { vault?.root.lastPathComponent ?? "No Vault" }
@@ -686,17 +738,21 @@ final class AppModel: ObservableObject {
         save()
     }
 
-    // Raw disk ops (not recorded)
+    // Raw disk ops (not recorded). Each marks the paths it touches as a self-write so the file
+    // watcher doesn't mistake the app's own change for an external edit.
     private func rawCreateFile(_ rel: String) {
         guard let vault else { return }
+        markSelfWrite(rel)
         FileManager.default.createFile(atPath: vault.url(rel).path, contents: Data())
     }
     private func rawCreateDir(_ rel: String) {
         guard let vault, !rel.isEmpty else { return }
+        markSelfWrite(rel)
         try? FileManager.default.createDirectory(at: vault.url(rel), withIntermediateDirectories: true)
     }
     private func rawMove(_ from: String, _ to: String) {
         guard let vault else { return }
+        markSelfWrite(from); markSelfWrite(to)
         let parent = (to as NSString).deletingLastPathComponent
         if !parent.isEmpty {
             try? FileManager.default.createDirectory(at: vault.url(parent), withIntermediateDirectories: true)
@@ -705,12 +761,14 @@ final class AppModel: ObservableObject {
     }
     private func rawTrash(_ rel: String) -> URL? {
         guard let vault else { return nil }
+        markSelfWrite(rel)
         var out: NSURL?
         try? FileManager.default.trashItem(at: vault.url(rel), resultingItemURL: &out)
         return out as URL?
     }
     private func rawRestore(_ trashURL: URL, to rel: String) {
         guard let vault else { return }
+        markSelfWrite(rel)
         let parent = (rel as NSString).deletingLastPathComponent
         if !parent.isEmpty {
             try? FileManager.default.createDirectory(at: vault.url(parent), withIntermediateDirectories: true)
@@ -736,6 +794,7 @@ final class AppModel: ObservableObject {
     }
     private func rawCopy(_ from: String, _ to: String) {
         guard let vault else { return }
+        markSelfWrite(to)
         let parent = (to as NSString).deletingLastPathComponent
         if !parent.isEmpty {
             try? FileManager.default.createDirectory(at: vault.url(parent), withIntermediateDirectories: true)
@@ -861,6 +920,7 @@ final class AppModel: ObservableObject {
             let newId = node.kind == .folder ? addFolder(inDir: dir, at: c) : addNote(inDir: dir, at: c)
             if let newId {
                 board.edges.append(BoardEdge(from: node.id, to: newId))
+                if let sibling = self.node(newId) { writeLink(from: node, to: sibling) }
             }
         }
     }
@@ -1118,6 +1178,7 @@ final class AppModel: ObservableObject {
 
     private func rawWrite(_ rel: String, _ text: String) {
         guard let vault else { return }
+        markSelfWrite(rel)
         try? text.data(using: .utf8)?.write(to: vault.url(rel), options: .atomic)
     }
 
@@ -1132,6 +1193,19 @@ final class AppModel: ObservableObject {
             txnFileRedo.append { self.rawWrite(rel, text) }
             txnFileUndo.append { self.rawWrite(rel, old) }
         }
+    }
+
+    /// Apply a pure text transform to a file and record the write so it's reversed with the rest of
+    /// the active transaction (one undo step covers board + disk). No-op if the transform changes
+    /// nothing. Must run inside an open `transaction`.
+    private func rewriteFile(_ rel: String, _ transform: (String) -> String) {
+        guard let vault else { return }
+        let old = (try? String(contentsOf: vault.url(rel), encoding: .utf8)) ?? ""
+        let new = transform(old)
+        guard new != old else { return }
+        rawWrite(rel, new)
+        txnFileRedo.append { self.rawWrite(rel, new) }
+        txnFileUndo.append { self.rawWrite(rel, old) }
     }
 
     func setPosition(_ id: UUID, to center: CGPoint) {
@@ -1205,6 +1279,29 @@ final class AppModel: ObservableObject {
 
     // MARK: Connectors
 
+    /// A note whose body can hold a `[[wikilink]]` — i.e. a markdown file. Only these participate in
+    /// the connector ↔ link bridge; CSV/code notes and folders get a visual-only edge for now.
+    private func isLinkable(_ node: BoardNode) -> Bool {
+        node.kind == .note && node.fileType == .markdown
+    }
+
+    /// Make the directed edge `from → to` a real link on disk: add `[[to]]` to `from`'s managed
+    /// canvas-links block. No-op unless both ends are markdown notes. Must run inside a transaction.
+    private func writeLink(from: BoardNode, to: BoardNode) {
+        guard isLinkable(from), isLinkable(to) else { return }
+        rewriteFile(from.relPath) { text in
+            ManagedLinks.write(ManagedLinks.targets(in: text) + [to.name], into: text)
+        }
+    }
+
+    /// Remove the `[[to]]` link from `from`'s managed block (the inverse of `writeLink`).
+    private func removeLink(from: BoardNode, to: BoardNode) {
+        guard isLinkable(from), isLinkable(to) else { return }
+        rewriteFile(from.relPath) { text in
+            ManagedLinks.write(ManagedLinks.targets(in: text).filter { $0 != to.name }, into: text)
+        }
+    }
+
     /// Select a connector, clearing any box selection / rename in progress.
     func selectEdge(_ id: UUID) {
         selection = []
@@ -1224,6 +1321,7 @@ final class AppModel: ObservableObject {
         transaction {
             let edge = BoardEdge(from: from, to: to)
             board.edges.append(edge)
+            if let a = node(from), let b = node(to) { writeLink(from: a, to: b) }
             selection = []
             editingId = nil
             selectedEdge = edge.id
@@ -1232,8 +1330,9 @@ final class AppModel: ObservableObject {
     }
 
     func deleteEdge(_ id: UUID) {
-        guard board.edges.contains(where: { $0.id == id }) else { return }
+        guard let edge = board.edges.first(where: { $0.id == id }) else { return }
         transaction {
+            if let a = node(edge.from), let b = node(edge.to) { removeLink(from: a, to: b) }
             board.edges.removeAll { $0.id == id }
             if selectedEdge == id { selectedEdge = nil }
         }

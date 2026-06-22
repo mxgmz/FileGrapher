@@ -30,6 +30,7 @@ SwiftPM executable, single target `GraphingApp`. Source in `Sources/GraphingApp/
 | `App.swift` | `@main`, `AppDelegate` (sets `.regular` activation so the bare bundle shows a window), `RootView` → `WelcomeView` / `MainView`, `TopBar`, menu commands (New, Undo/Redo). |
 | `Model.swift` | Data (`BoardNode`, `BoardEdge`, `BoardData`), `Vault` (disk + `board.json`), and `AppModel` (`ObservableObject`) holding **all** state + logic: transforms, vault lifecycle, disk sync, mutations, the **undo/redo transaction engine**, and folder auto-grow geometry. |
 | `Canvas.swift` | `CanvasView` (infinite canvas, `NSEvent` input monitor, pan/zoom, dot grid, curved edges, spawn handles, resize handles), `NodeView` (note/folder boxes, drag, group-move, region-aware double-tap), `HandleButton` (the `+`), `ResizeHandle` (folder corners), `InlineTitle` (rename field). |
+| `Links.swift` | `ManagedLinks` — pure (Foundation-only) read/write of the app-owned `<!-- canvas-links -->` block in a note. The connector↔`[[wikilink]]` bridge (Living Canvas Phase 1): a drawn edge writes a wikilink here, never touching user prose. Headless-tested. |
 | `Sidebar.swift` | File/folder tree (`OutlineGroup`) built from the same nodes as the canvas. |
 | `FileContent.swift` | The content **peek** popover (`FilePeekOverlay`/`FilePeekCard`), a zero-dep Markdown block renderer (`MarkdownView`/`MarkdownBlock`), and a read-only CSV table (`CSVTableView`/`CSV`). |
 

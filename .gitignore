@@ -11,3 +11,6 @@ dist/
 
 # macOS
 .DS_Store
+
+# Crash reports / scratch dumps
+*.tst

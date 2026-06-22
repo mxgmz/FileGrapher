@@ -23,8 +23,38 @@ Committed:
   Canvas.swift, + Shift-drag-adds, + multi-move via `dragGroup`, + multi-delete. Reviewed correct
   end-to-end; **pending Max's visual verify** before closing.)*
 - ⬜ **Live file-watching** — detect notes/folders created or deleted in Obsidian/Finder and
-  reconcile without the manual ↻ (DispatchSource/FSEvents on the vault root).
+  reconcile without the manual ↻ (DispatchSource/FSEvents on the vault root). *(Now the foundation of
+  Sprint 3 / Living Canvas Phase 1 — see below; the read side of the bidirectional link graph.)*
 - ⬜ **Fix:** ⌘Z while editing a box title should undo the *text*, not the board.
+
+---
+
+## 🌅 Next sprint — "Sprint 3 · Living Canvas Phase 1" (the spine)
+**Goal:** make a connector a *real link* in the file, and make the canvas reflect the vault **live**.
+**Spec:** see [`VISION-living-canvas.md`](VISION-living-canvas.md) (full brainstorm 2026-06-21) — the
+*what & why*; the table below is the *what-to-build*. Design law for all of it: **"alive but sober."**
+
+Committed (Phase 1 — notes linking + live read, **no git required**):
+- 🔄 **Connector → real `[[wikilink]]`** — ✅ **write side (S12):** drawing an edge between two `.md`
+  notes (manual connect, `+`-handle spawn) writes `[[Target]]` into the source note's managed
+  `<!-- canvas-links -->` block; deleting the edge removes it; **undo reverses canvas + disk together**
+  (rides the existing paired transaction engine via `rewriteFile`). ⬜ *Read side still pending* (below).
+- ✅ **Managed-links block round-trip (S12)** — `ManagedLinks` (`Links.swift`) owns *only* the text
+  between the markers; user prose is never touched. Headless-tested (12 cases: seams, dedup,
+  alias/heading strip, removal, round-trip). *(Optional YAML-frontmatter mirror still parked.)*
+- ⬜ **Read side: `[[links]]` → auto-drawn edges** — a file linked in Obsidian or by an agent shows its
+  edge on the canvas. Edge *style* (color/curve/arrow/label) persists in `board.json` keyed to `(from→to)`.
+  *(Next increment: reconcile disk wikilinks → `board.edges` in `syncFromDisk`; resolve `[[name]]` →
+  node by basename. Watch the "Untitled" basename collisions in the live vault.)*
+- ⬜ **Live file-watching (carried from Sprint 2)** — FSEvents on the vault root, debounced; links,
+  content, and structure update live. **Self-write suppression** so the app's own writes don't loop
+  (same feedback-loop class as the S10 meltdown).
+- ⬜ **Conflict default = non-destructive reload banner** ("Updated on disk — Reload"); the ghost overlay
+  (safe live-overwrite) is the parallel track 3a, not Phase 1.
+
+Later phases (tracked in the spec, not this sprint): **P2** typed/labeled links · **P3** code references
+(derived + comment-annotation) · **P4** folder-notes · **3a** ghost overlay + live block-flow + soft-lock
++ presence · **3b** git time-travel (loupe review, commit scrubber, branch-as-layer).
 
 ---
 

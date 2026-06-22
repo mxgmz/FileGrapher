@@ -649,6 +649,13 @@ struct NodeView: View {
         )
         .shadow(color: .black.opacity(0.12), radius: (isSelected ? 7 : 4) * scale, y: 2 * scale)
         .onAppear { cardText = model.fileText(node.id); cardDraft = cardText }
+        .onChange(of: model.diskRevision) { _, _ in
+            // A watched file changed (our own link-write or an external edit). Re-read — but never
+            // while the user is editing this card, or we'd clobber their unsaved draft.
+            guard !cardEditing else { return }
+            let fresh = model.fileText(node.id)
+            if fresh != cardText { cardText = fresh; cardDraft = fresh }
+        }
         .onDisappear { if cardEditing { model.saveFileContent(node.id, cardDraft) } }
     }
 

@@ -68,6 +68,11 @@ struct FilePeekCard: View {
             if editing { model.saveFileContent(node.id, draft) }
             editing = false; loaded = model.fileText(node.id); draft = loaded
         }
+        .onChange(of: model.diskRevision) { _, _ in
+            guard !editing else { return }   // don't clobber an in-progress edit
+            let fresh = model.fileText(node.id)
+            if fresh != loaded { loaded = fresh; draft = fresh }
+        }
     }
 
     private var header: some View {
