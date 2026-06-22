@@ -101,6 +101,7 @@ struct BoardNode: Identifiable, Codable, Equatable {
     var colorName: String?       // BoxColor raw value; nil == app accent
     var fontScale: Double?       // title size multiplier; nil == 1.0
     var expanded: Bool?          // note shown as an in-place content card; nil/false == title-only
+    var fileId: UInt64?          // disk inode — lets syncFromDisk follow a box to a file's new path
 
     /// True when this note is showing its content inline as a card.
     var isExpanded: Bool { (expanded ?? false) && kind == .note }
@@ -412,6 +413,72 @@ final class AppModel: ObservableObject {
         return changed
     }
 
+    /// A folder bigger than this isn't a layout, it's corruption (one child stranded far from its
+    /// siblings makes the folder auto-grow without bound and become unclickable).
+    static let maxSaneFolderSpan: CGFloat = 20000
+    /// A child this far from its siblings' median is stranded and gets pulled back in.
+    static let strandRadius: CGFloat = 12000
+
+    /// Repair corrupt layouts where a folder child sits absurdly far from its siblings (e.g. a leftover
+    /// from the S10 coordinate repair), which makes the folder's `effectiveFrame` balloon to an
+    /// unclickable size. Deepest folders first, so an inner fix settles before its parent is measured.
+    /// Conservative: only egregious outliers move (carrying their own subtree), and a folder's stored
+    /// frame is reset only when it was bloated past sanity — normal layouts are left untouched. Runs at
+    /// load (not undoable). Returns true if anything changed.
+    @discardableResult
+    func reinInStrandedChildren() -> Bool {
+        var changed = false
+        let deepestFirst = board.nodes
+            .filter { $0.kind == .folder }
+            .sorted { $0.relPath.filter { $0 == "/" }.count > $1.relPath.filter { $0 == "/" }.count }
+        for folder in deepestFirst {
+            guard let fi = board.nodes.firstIndex(where: { $0.id == folder.id }) else { continue }
+            let kids = directChildren(of: folder.relPath)
+            guard !kids.isEmpty else { continue }
+            let frame = effectiveFrame(of: folder)
+            guard frame.width > AppModel.maxSaneFolderSpan || frame.height > AppModel.maxSaneFolderSpan else { continue }
+
+            let anchorX = median(kids.map { $0.center.x })
+            let anchorY = median(kids.map { $0.center.y })
+            var slot = 0
+            for kid in kids where hypot(kid.center.x - anchorX, kid.center.y - anchorY) > AppModel.strandRadius {
+                moveSubtree(kid.id, to: CGPoint(x: anchorX + CGFloat(slot % 4) * 180 - 270,
+                                                y: anchorY + CGFloat(slot / 4) * 110 + 70))
+                slot += 1
+            }
+            if board.nodes[fi].width > AppModel.maxSaneFolderSpan || board.nodes[fi].height > AppModel.maxSaneFolderSpan {
+                board.nodes[fi].width = AppModel.folderSize.width
+                board.nodes[fi].height = AppModel.folderSize.height
+            }
+            board.nodes[fi].center = CGPoint(x: anchorX, y: anchorY)
+            changed = true
+        }
+        if changed {
+            Log.canvas.notice("Reined in stranded folder children on load — a box was far enough from its siblings to balloon its folder.")
+        }
+        return changed
+    }
+
+    /// Move a box (and its whole subtree, rigid-body) so the box lands at `center`. Coordinates clamped.
+    private func moveSubtree(_ id: UUID, to center: CGPoint) {
+        guard let i = board.nodes.firstIndex(where: { $0.id == id }) else { return }
+        let dx = center.x - board.nodes[i].center.x
+        let dy = center.y - board.nodes[i].center.y
+        board.nodes[i].center = CGPoint(x: AppModel.clampCoord(center.x), y: AppModel.clampCoord(center.y))
+        let prefix = board.nodes[i].relPath + "/"
+        for j in board.nodes.indices where board.nodes[j].relPath.hasPrefix(prefix) {
+            board.nodes[j].center = CGPoint(x: AppModel.clampCoord(board.nodes[j].center.x + dx),
+                                            y: AppModel.clampCoord(board.nodes[j].center.y + dy))
+        }
+    }
+
+    private func median(_ values: [CGFloat]) -> CGFloat {
+        guard !values.isEmpty else { return 0 }
+        let sorted = values.sorted()
+        let mid = sorted.count / 2
+        return sorted.count % 2 == 0 ? (sorted[mid - 1] + sorted[mid]) / 2 : sorted[mid]
+    }
+
     func worldToScreen(_ p: CGPoint) -> CGPoint {
         CGPoint(x: p.x * zoom + pan.width, y: p.y * zoom + pan.height)
     }
@@ -471,7 +538,11 @@ final class AppModel: ObservableObject {
         let v = Vault(root: url)
         vault = v
         board = v.loadBoard()
-        if sanitizeBoardGeometry() { v.saveBoard(board) }   // self-heal a corrupt board before it can hang
+        // Self-heal a corrupt board before it can hang or become unusable: clamp runaway coords, then
+        // pull any stranded folder child back so no folder auto-grows to an unclickable size.
+        let repaired = sanitizeBoardGeometry()
+        let healed = reinInStrandedChildren()
+        if repaired || healed { v.saveBoard(board) }
         UserDefaults.standard.set(url.path, forKey: defaultsKey)
         clearHistory()
         syncFromDisk()
@@ -540,6 +611,8 @@ final class AppModel: ObservableObject {
 
         var diskRels = Set<String>()
         var dirRels = Set<String>()
+        var relByInode: [UInt64: String] = [:]   // disk inode -> its current path, for move detection
+        var inodeByRel: [String: UInt64] = [:]
         if let en = fm.enumerator(at: vault.root,
                                   includingPropertiesForKeys: [.isDirectoryKey],
                                   options: [.skipsHiddenFiles]) {
@@ -552,40 +625,75 @@ final class AppModel: ObservableObject {
                     dirRels.insert(rel)
                 } else if AppModel.boxableExts.contains(fileURL.pathExtension.lowercased()) {
                     diskRels.insert(rel)
+                } else {
+                    continue
                 }
+                if let ino = AppModel.inode(of: fileURL) { relByInode[ino] = rel; inodeByRel[rel] = ino }
             }
         }
 
-        // Drop boxes whose backing file no longer exists.
+        // Follow moves/renames: a box whose path vanished but whose stored inode now lives at a new
+        // path didn't disappear — it MOVED (a rename in Obsidian/Finder). Repoint it and keep its
+        // position, instead of dropping it and re-adding a stranger. This is what stops an external
+        // folder rename from collapsing its whole subtree onto a default corner.
+        for i in board.nodes.indices {
+            let node = board.nodes[i]
+            guard !diskRels.contains(node.relPath), let ino = node.fileId, let moved = relByInode[ino],
+                  !board.nodes.contains(where: { $0.relPath == moved }) else { continue }
+            board.nodes[i].relPath = moved
+        }
+
+        // Drop boxes whose backing file is genuinely gone.
         board.nodes.removeAll { !diskRels.contains($0.relPath) }
         let known = Set(board.nodes.map { $0.relPath })
 
-        // Add boxes for anything new on disk, in a simple grid near the center.
-        let missing = diskRels.subtracting(known).sorted()
-        var col = 0
-        var row = 0
-        let originX = 9600.0
-        let originY = 9800.0
-        for rel in missing {
+        // Add boxes for genuinely-new files, tucked near their parent folder — never a fixed far
+        // corner, which used to strand them and balloon the folder's auto-grown frame.
+        for (index, rel) in diskRels.subtracting(known).sorted().enumerated() {
             let isDir = dirRels.contains(rel)
             let size = isDir ? AppModel.folderSize : AppModel.noteSize
-            let node = BoardNode(
-                kind: isDir ? .folder : .note,
-                relPath: rel,
-                x: originX + Double(col) * 260,
-                y: originY + Double(row) * 150,
-                width: size.width,
-                height: size.height
-            )
+            let center = spawnCenter(forNew: rel, index: index)
+            var node = BoardNode(kind: isDir ? .folder : .note, relPath: rel,
+                                 x: center.x, y: center.y, width: size.width, height: size.height)
+            node.fileId = inodeByRel[rel]
             board.nodes.append(node)
-            col += 1
-            if col >= 5 { col = 0; row += 1 }
+        }
+
+        // Refresh inodes so the next sync can detect moves (also backfills boxes from an older board).
+        for i in board.nodes.indices {
+            if let ino = inodeByRel[board.nodes[i].relPath] { board.nodes[i].fileId = ino }
         }
 
         // Clean up dangling edges.
         let ids = Set(board.nodes.map { $0.id })
         board.edges.removeAll { !ids.contains($0.from) || !ids.contains($0.to) }
         save()
+    }
+
+    /// The file's inode — stable across renames/moves on the same volume, so `syncFromDisk` can follow
+    /// a box to a file's new path instead of dropping it.
+    static func inode(of url: URL) -> UInt64? {
+        guard let number = (try? FileManager.default.attributesOfItem(atPath: url.path))?[.systemFileNumber]
+        else { return nil }
+        return (number as? NSNumber)?.uint64Value
+    }
+
+    /// Where to place a box newly discovered on disk: next to its parent folder's existing children
+    /// (or the folder box itself), else near the viewport the user is looking at — with a small
+    /// cascade for batches. Never a fixed far corner (which stranded children and ballooned folders).
+    private func spawnCenter(forNew rel: String, index: Int) -> CGPoint {
+        let parent = (rel as NSString).deletingLastPathComponent
+        let anchor: CGPoint
+        if !parent.isEmpty,
+           let near = directChildren(of: parent).first?.center
+                      ?? board.nodes.first(where: { $0.relPath == parent })?.center {
+            anchor = CGPoint(x: near.x + 150, y: near.y)
+        } else if viewport != .zero {
+            anchor = screenToWorld(CGPoint(x: viewport.width / 2, y: viewport.height / 2))
+        } else {
+            anchor = CGPoint(x: 10000, y: 10000)
+        }
+        return CGPoint(x: anchor.x + CGFloat(index % 5) * 200, y: anchor.y + CGFloat(index / 5) * 120)
     }
 
     // MARK: Lookups

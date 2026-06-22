@@ -22,9 +22,11 @@ Committed:
   *(found already fully implemented S10: `marqueeGesture`/`applyMarqueeSelection`/`marqueeOverlay` in
   Canvas.swift, + Shift-drag-adds, + multi-move via `dragGroup`, + multi-delete. Reviewed correct
   end-to-end; **pending Max's visual verify** before closing.)*
-- ⬜ **Live file-watching** — detect notes/folders created or deleted in Obsidian/Finder and
-  reconcile without the manual ↻ (DispatchSource/FSEvents on the vault root). *(Now the foundation of
-  Sprint 3 / Living Canvas Phase 1 — see below; the read side of the bidirectional link graph.)*
+- ✅ **Live file-watching (S12)** — `VaultWatcher` (FSEvents, debounced) reconciles notes/folders
+  created/deleted/moved in Obsidian/Finder without the manual ↻, and bumps `diskRevision` so open
+  cards/peeks re-read live. **Self-write suppression** (`markSelfWrite` + `isRecentSelfWrite`) and a
+  mid-interaction guard keep the app's own writes from looping or yanking a drag. *(Found+fixed an
+  FSEvents `UseCFTypes` crash. The link auto-draw on external `[[..]]` still needs the read side below.)*
 - ⬜ **Fix:** ⌘Z while editing a box title should undo the *text*, not the board.
 
 ---
@@ -46,9 +48,17 @@ Committed (Phase 1 — notes linking + live read, **no git required**):
   edge on the canvas. Edge *style* (color/curve/arrow/label) persists in `board.json` keyed to `(from→to)`.
   *(Next increment: reconcile disk wikilinks → `board.edges` in `syncFromDisk`; resolve `[[name]]` →
   node by basename. Watch the "Untitled" basename collisions in the live vault.)*
-- ⬜ **Live file-watching (carried from Sprint 2)** — FSEvents on the vault root, debounced; links,
-  content, and structure update live. **Self-write suppression** so the app's own writes don't loop
-  (same feedback-loop class as the S10 meltdown).
+- ✅ **Live file-watching (S12)** — `VaultWatcher` (FSEvents, debounced): **content** (open cards/peeks
+  re-read via `diskRevision`, edit-guarded) and **structure** (create/delete/move boxes via
+  `syncFromDisk`) update live, with **self-write suppression** so the app's own writes don't loop. *Links*
+  don't auto-draw on external `[[..]]` yet — that's gated on the read side above.
+- ✅ **Folder geometry hardening (S14)** — three fixes after live-watch exposed latent fragility:
+  **(1) move-aware `syncFromDisk`** (inode `BoardNode.fileId` → an external rename follows the box, keeping
+  position+UUID, instead of collapsing the subtree to a corner); **(2) heal stranded children**
+  (`reinInStrandedChildren` at load → no folder auto-grows to an unclickable size; fixed Max's
+  114148×98109 Folder 6); **(3) spawn new boxes near their parent**, not a fixed corner. Heal + mirror
+  verified on the real board; **Fix 1 still needs an isolated end-to-end verify** (live-vault test tangled
+  with concurrent in-app dragging — don't stress-test the live vault).
 - ⬜ **Conflict default = non-destructive reload banner** ("Updated on disk — Reload"); the ghost overlay
   (safe live-overwrite) is the parallel track 3a, not Phase 1.
 

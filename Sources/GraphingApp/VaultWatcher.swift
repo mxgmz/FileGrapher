@@ -35,8 +35,12 @@ final class VaultWatcher {
             let changed = (0..<count).compactMap { paths[$0] as? String }
             watcher.collect(changed)
         }
+        // UseCFTypes → callback gets a CFArray of CFStrings (so the NSArray bridge below is valid;
+        // without it `eventPaths` is a C `char**` and messaging it as an object crashes).
         // FileEvents → per-file paths (not just the parent dir); NoDefer → fire promptly on the first event.
-        let flags = UInt32(kFSEventStreamCreateFlagFileEvents | kFSEventStreamCreateFlagNoDefer)
+        let flags = UInt32(kFSEventStreamCreateFlagUseCFTypes
+                           | kFSEventStreamCreateFlagFileEvents
+                           | kFSEventStreamCreateFlagNoDefer)
         guard let stream = FSEventStreamCreate(
             kCFAllocatorDefault, callback, &context,
             [root.path] as CFArray,

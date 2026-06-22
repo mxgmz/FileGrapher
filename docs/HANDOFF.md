@@ -5,7 +5,49 @@ open questions. At a session's start, read the top entry to pick up where we lef
 
 ---
 
-## 📍 PICK UP HERE — Session 13 (PLAN ONLY, not built) — re-file bug + snappy resize + no-overlap hitboxes
+## 2026-06-22 — Session 14 — folder geometry fixes: move-aware sync · heal stranded children · spawn-near-parent
+**Context:** after live-watching shipped, a folder rename "broke it" — sidebar didn't update + a **huge,
+unclickable Folder 7**. Probe (`/tmp/fsprobe.swift`) found a directory rename emits **only the two dir
+paths** (`Renamed|isDir`), no descendants — so an *in-app* rename is fully self-write-suppressed (watcher
+doesn't even sync). The real culprits were latent: a stranded child (S10 remnant) ballooning a folder via
+auto-grow, and `syncFromDisk`'s lossy path-set diff collapsing an *external* rename's subtree to a corner.
+
+**What shipped (`Model.swift`):**
+- **Move-aware `syncFromDisk` (Fix 1).** New `BoardNode.fileId` (disk inode, Codable-optional, backfilled
+  each sync). Before drop/add, a box whose path vanished but whose inode now lives at a new path is
+  **repointed (position + UUID kept)** instead of dropped+re-added. Kills the external-folder-rename
+  subtree-collapse. `static inode(of:)` helper. *Edge case:* inode reuse after delete could mis-map (rare;
+  guarded by "don't claim a path another node owns").
+- **Spawn-near-parent (Fix 3).** New boxes from sync land **next to their parent folder's children** (or
+  the folder box, else viewport center), never the old fixed (9600,9800) corner — so even if move-detection
+  misses, a re-add no longer strands. `spawnCenter(forNew:index:)`.
+- **Heal stranded children (Fix 2).** `reinInStrandedChildren()` (run in `openVault` after sanitize):
+  deepest-folders-first, for any folder whose `effectiveFrame` exceeds `maxSaneFolderSpan` (20000), pull
+  children >`strandRadius` (12000) from the sibling **median** back in (rigid-body w/ their subtree) and
+  reset a bloated stored frame. Fixes the unclickable folders. Helpers `moveSubtree`, `median`.
+
+**Verified on Max's REAL board (headless):** heal ran on relaunch → Folder 6 stored **114148×98109 → 340×230**,
+all folder child-spans now ≤~5700px (was ~116000), nothing >20000 → folders clickable. Mirror is **complete
++ duplicate-free**: every disk file has a box, **0 at the corner**, board ⊆ disk. Watcher still 0.31s, app
+alive, no crash, **no runaway auto-move** (disk md5 stable over 4s). Build clean, no warnings.
+
+> ⚠️ **Move-aware sync (Fix 1) NOT cleanly verified end-to-end.** While testing an external folder rename
+> on the **live** vault, my test folder tangled with Max's concurrent in-app dragging (the app's `rawMove`,
+> not my code — my sync never moves files). **Lesson: never run write/stress tests on the live vault while
+> Max is using it.** Verify Fix 1 in an **isolated temp vault** (or with Max not interacting). Note: even
+> without move-detection, spawn-near-parent already prevents the corner-collapse, so Fix 1 is a
+> position/UUID-preserving *upgrade*, not the sole safety net.
+
+> 🧹 **Vault left tangled, by Max's choice ("Leave it — I'll fix it"):** `Folder 7/RenameTest/Folder 6/…`
+> (his Folder 6 nested under my test `RenameTest`) + my `note.md`. **Do not auto-clean** — Max reorganizes it.
+> Board matches disk (no phantom nodes); `board.json.bak-heal-*` is the pre-heal backup.
+
+**Next up:** isolated verify of Fix 1; decide whether to also cap `effectiveFrame` as a belt-and-suspenders;
+the "name didn't update" was likely a beep-fail (rename to existing name) or undo — not a watcher revert.
+
+---
+
+## 📍 Session 13 (PLAN) — re-file bug + snappy resize + no-overlap hitboxes  (WS1/WS2 now built)
 
 > Brainstormed with Max 2026-06-21. **No code written yet — this is the build plan.** Three asks, one
 > underlying primitive: a box **hitbox** (= its `effectiveFrame`) + a no-overlap rule. Build in the
@@ -157,6 +199,48 @@ a nearest-match rule). Then live file-watching (FSEvents + self-write suppressio
 **Known limitations (acceptable for the write-side increment):** rename of a note doesn't yet update
 incoming `[[oldname]]` links elsewhere (Obsidian-style link-update is out of scope); deleting a node
 leaves dangling incoming links (as Obsidian does); basename ambiguity is a read-side problem, deferred.
+
+---
+
+## 2026-06-21 — Session 12 (cont.) — Live file-watching (the read side) + an FSEvents crash fix
+**Ask (Max):** "live refresh now" — make open content cards/peeks re-read the moment a file changes on
+disk (the staleness he hit after connecting: the source card cached its text on open and never refreshed).
+
+**What shipped:**
+- **New `Sources/GraphingApp/VaultWatcher.swift`** — a zero-dep FSEvents wrapper (CoreServices). Watches
+  the vault tree, coalesces each save's burst (0.15s debounce), and reports changed **vault-relative**
+  paths. ⚠️ **Must pass `kFSEventStreamCreateFlagUseCFTypes`** (+ `FileEvents` + `NoDefer`): without it
+  `eventPaths` is a C `char**`, and the `NSArray` bridge messages garbage → **hard crash on the first
+  event** (found & fixed mid-session; the crash `.ips` pointed straight at `VaultWatcher.swift` /
+  `objc_msgSend` on the `app.graphing.vaultwatcher` queue).
+- **Wired into `AppModel`** — `@Published diskRevision` bumps on any non-`.graphingapp` change; the
+  expanded card (`Canvas.swift`) and peek (`FileContent.swift`) now `.onChange(of: model.diskRevision)`
+  re-read from disk — **guarded by `!editing`** so an in-progress edit is never clobbered. Re-reading
+  after our *own* link-write is what makes a drawn connector's `[[link]]` appear live in the source card.
+- **Self-write suppression** — every `raw*` disk op calls `markSelfWrite(rel)`; `handleDiskChange` runs
+  the structure reconcile (`syncFromDisk`) only for **external** changes (`isRecentSelfWrite` < 2s window)
+  and **never mid-interaction** (`interactionBefore == nil`), so the app's own writes don't loop or yank a
+  drag. Content re-read fires for both (it's read-only + edit-guarded).
+- Watcher starts in `openVault`, stops in `closeVault`.
+
+**Verified (headless, end-to-end):** `swift build` clean (no warnings). Proved the watcher with file
+breadcrumbs + a `board.json` poll: an **external `create` reconciles in ~0.26s, `delete` in ~0.5s**, app
+stays alive (0% CPU, no loop). os_log isn't queryable in this env — used a temp `/tmp` breadcrumb to
+confirm `handleDiskChange` fires with the right `relevant` paths and that `.graphingapp` echoes are
+filtered; **breadcrumbs since removed.** Content-refresh of an *open card* couldn't be eye-verified
+headlessly (needs the UI) but the mechanism is proven sound.
+> **Owe Max:** open `Peek demo`'s card, then edit it in Obsidian (or connect another edge) → the card
+> should update within ~0.5s without reopening. And: external create/delete a note → box fades in/out live.
+
+**Cross-feature note (Max editing in parallel):** Max was mid-**WS1** (re-file drop-point) in `Canvas.swift`.
+His edit called `canvasLocal(...)` from `NodeView`, but it was a `private func` on another struct → red
+build. Per his pick, **hoisted `canvasLocal` onto `AppModel`** (it owns `canvasFrameGlobal`) and routed all
+call sites through `model.canvasLocal(...)`, removing the duplicate. Tree now builds clean with both
+features. (His WS1 model-side `dropTargetId`/`dropTargetHighlight`/`endDrag(_:at:)` are in but unverified.)
+
+**Next up:** the **read side** of links (still the gap): parse `[[wikilinks]]` on disk → auto-draw edges
+in `syncFromDisk` (now that live-watching will call it automatically). Then the conflict **reload banner**
++ the stale-card edit-clobber guard (editing a card opened before an external change still saves over it).
 
 ---
 
