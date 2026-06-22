@@ -637,6 +637,39 @@ final class AppModel: ObservableObject {
         return folder.id
     }
 
+    /// Nearest center to `desired` where box `id`'s hitbox (its `effectiveFrame`) clears all of its
+    /// SIBLINGS' hitboxes — same-parent boxes only, since a folder must still contain its own
+    /// children. Returns `desired` when it's already free, or nil if nothing's free within the capped
+    /// spiral (caller then accepts the overlap). A folder's whole subtree translates together, so its
+    /// hitbox just shifts by the candidate delta — hence the offset probe.
+    func nearestFreeCenter(for id: UUID, near desired: CGPoint) -> CGPoint? {
+        guard let box = node(id) else { return nil }
+        let hitbox = effectiveFrame(of: box)
+        let siblings = board.nodes
+            .filter { $0.parentRel == box.parentRel && $0.id != id }
+            .map { effectiveFrame(of: $0) }
+        func isFree(_ c: CGPoint) -> Bool {
+            let probe = hitbox.offsetBy(dx: c.x - box.center.x, dy: c.y - box.center.y)
+            return !siblings.contains { $0.intersects(probe) }
+        }
+        if isFree(desired) { return desired }
+        let step = AppModel.gridStep
+        // ponytail: capped ring scan on the grid; if no gap within ~24 rings, accept the overlap.
+        for ring in 1...24 {
+            let r = CGFloat(ring) * step
+            for k in -ring...ring {
+                let o = CGFloat(k) * step
+                for c in [CGPoint(x: desired.x + o, y: desired.y - r),
+                          CGPoint(x: desired.x + o, y: desired.y + r),
+                          CGPoint(x: desired.x - r, y: desired.y + o),
+                          CGPoint(x: desired.x + r, y: desired.y + o)] where isFree(c) {
+                    return c
+                }
+            }
+        }
+        return nil
+    }
+
     /// Boxes whose parent folder is exactly `relPath` (one level down).
     func directChildren(of relPath: String) -> [BoardNode] {
         board.nodes.filter { $0.parentRel == relPath }
@@ -916,6 +949,23 @@ final class AppModel: ObservableObject {
             if folder.relPath != current.parentRel { relocate(to: folder.relPath) }
         } else if current.parentRel != "" {
             relocate(to: "")
+        }
+
+        // Settle on drop: if the box landed overlapping a sibling, slide it (and, for a folder, its
+        // whole subtree) to the nearest free spot. Runs after any re-file so siblings are measured in
+        // the box's final folder; the nudge rides this drag's single undo step. Only new drops settle
+        // — existing overlaps on load are left untouched.
+        let landed = board.nodes[idx].center
+        if let free = nearestFreeCenter(for: id, near: landed), free != landed {
+            let dx = free.x - landed.x, dy = free.y - landed.y
+            board.nodes[idx].center = CGPoint(x: AppModel.clampCoord(free.x), y: AppModel.clampCoord(free.y))
+            if current.kind == .folder {
+                let prefix = board.nodes[idx].relPath + "/"
+                for di in board.nodes.indices where board.nodes[di].relPath.hasPrefix(prefix) {
+                    board.nodes[di].center = CGPoint(x: AppModel.clampCoord(board.nodes[di].center.x + dx),
+                                                     y: AppModel.clampCoord(board.nodes[di].center.y + dy))
+                }
+            }
         }
 
         commit(before: before, fileUndo: fU, fileRedo: fR)
