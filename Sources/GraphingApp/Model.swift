@@ -524,21 +524,27 @@ final class AppModel: ObservableObject {
 
     /// Topmost (smallest, most specific) box whose displayed frame contains a world point.
     func node(atWorld point: CGPoint) -> BoardNode? {
-        board.nodes
-            .map { ($0, effectiveFrame(of: $0)) }
-            .filter { $0.1.contains(point) }
-            .sorted { ($0.1.width * $0.1.height) < ($1.1.width * $1.1.height) }
-            .first?.0
+        smallestBox(containing: point)
     }
 
     /// The folder box (if any) whose displayed frame contains the given world point.
     func folderNode(containing point: CGPoint, excluding excludeId: UUID? = nil) -> BoardNode? {
+        smallestBox(containing: point) { $0.kind == .folder && $0.id != excludeId }
+    }
+
+    /// Smallest-area box whose displayed frame contains `point` — the topmost, most specific hit —
+    /// optionally limited to boxes passing `include`. One pass that keeps the running minimum and
+    /// computes each `effectiveFrame` only for candidates: no full sort, no intermediate arrays.
+    private func smallestBox(containing point: CGPoint,
+                             where include: (BoardNode) -> Bool = { _ in true }) -> BoardNode? {
         board.nodes
-            .filter { $0.kind == .folder && $0.id != excludeId }
-            .map { ($0, effectiveFrame(of: $0)) }
-            .filter { $0.1.contains(point) }
-            .sorted { ($0.1.width * $0.1.height) < ($1.1.width * $1.1.height) } // smallest first
-            .first?.0
+            .compactMap { node -> (node: BoardNode, area: CGFloat)? in
+                guard include(node) else { return nil }
+                let frame = effectiveFrame(of: node)
+                guard frame.contains(point) else { return nil }
+                return (node, frame.width * frame.height)
+            }
+            .min { $0.area < $1.area }?.node
     }
 
     /// Boxes whose parent folder is exactly `relPath` (one level down).
