@@ -23,6 +23,7 @@ struct CanvasView: View {
                 grid.allowsHitTesting(false)
                 interactiveEdges
                 world
+                dropTargetOutline
                 pendingConnector
                 handles
                 marqueeOverlay
@@ -398,6 +399,19 @@ struct CanvasView: View {
         }
     }
 
+    /// Live outline of the folder a dragged box will re-file into (set during a single-box drag).
+    @ViewBuilder
+    private var dropTargetOutline: some View {
+        if let id = model.dropTargetId, let folder = model.node(id) {
+            let f = model.effectiveFrame(of: folder)
+            RoundedRectangle(cornerRadius: 12)
+                .stroke(Color.accentColor, style: StrokeStyle(lineWidth: 3, dash: [7, 4]))
+                .frame(width: f.width * model.zoom, height: f.height * model.zoom)
+                .position(model.worldToScreen(CGPoint(x: f.midX, y: f.midY)))
+                .allowsHitTesting(false)
+        }
+    }
+
     // MARK: Spawn handles for the single selected box
 
     @ViewBuilder
@@ -457,16 +471,11 @@ struct HandleButton: View {
                   : "Click: add connected note · Drag: connect to another box")
     }
 
-    private func canvasLocal(_ global: CGPoint) -> CGPoint {
-        CGPoint(x: global.x - model.canvasFrameGlobal.minX,
-                y: global.y - model.canvasFrameGlobal.minY)
-    }
-
     /// Drag from the handle to draw a connector onto another box.
     private var connectDrag: some Gesture {
         DragGesture(minimumDistance: 6, coordinateSpace: .global)
             .onChanged { v in
-                let local = canvasLocal(v.location)
+                let local = model.canvasLocal(v.location)
                 let target = model.node(atWorld: model.screenToWorld(local))
                 model.pendingConnect = PendingConnect(
                     from: node.id,
@@ -474,7 +483,7 @@ struct HandleButton: View {
                     hoverTarget: (target.map { $0.id != node.id ? $0.id : nil }) ?? nil)
             }
             .onEnded { v in
-                let target = model.node(atWorld: model.screenToWorld(canvasLocal(v.location)))
+                let target = model.node(atWorld: model.screenToWorld(model.canvasLocal(v.location)))
                 if let target, target.id != node.id {
                     withAnimation(gappSpring) { _ = model.connect(from: node.id, to: target.id) }
                 }
@@ -913,13 +922,17 @@ struct NodeView: View {
                 for (id, c) in groupStart {
                     model.setPosition(id, to: CGPoint(x: c.x + dx, y: c.y + dy))
                 }
+                // Live drop-target highlight (single-box drags only; group moves never re-file).
+                model.dropTargetId = groupMultiSelect ? nil
+                    : model.dropTargetHighlight(for: node.id, at: model.worldFromGlobal(v.location))
             }
-            .onEnded { _ in
+            .onEnded { v in
                 let multi = groupMultiSelect
                 groupStart = [:]
                 groupMultiSelect = false
-                // Single-box drag re-files into a folder under the drop; group moves reposition only.
-                if multi { model.endInteraction() } else { model.endDrag(node.id) }
+                // Single-box drag re-files into the folder under the drop point; group moves reposition only.
+                if multi { model.endInteraction() }
+                else { model.endDrag(node.id, at: model.worldFromGlobal(v.location)) }
             }
     }
 }

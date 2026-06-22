@@ -288,6 +288,7 @@ final class AppModel: ObservableObject {
     @Published var editingId: UUID?
     @Published var selectedEdge: UUID?     // the connector currently selected (if any)
     @Published var pendingConnect: PendingConnect?   // in-progress drag from a handle
+    @Published var dropTargetId: UUID?   // folder a dragged box will re-file into (live drop highlight)
 
     // Clipboard for box copy/cut/paste (internal, disk-aware). See `copyToClipboard` etc.
     @Published private(set) var clipboard: [ClipboardEntry] = []
@@ -418,6 +419,21 @@ final class AppModel: ObservableObject {
         CGPoint(x: (p.x - pan.width) / zoom, y: (p.y - pan.height) / zoom)
     }
 
+    /// Convert a point in global (window) space to canvas-local screen space by removing the canvas
+    /// frame's origin — the step before `screenToWorld` for any gesture using `.global` coordinates.
+    /// Shared by the canvas background and the per-node drag/connect gestures.
+    func canvasLocal(_ global: CGPoint) -> CGPoint {
+        CGPoint(x: global.x - canvasFrameGlobal.minX,
+                y: global.y - canvasFrameGlobal.minY)
+    }
+
+    /// Convert a `.global`-space gesture location to a world point: subtract the canvas's window
+    /// origin, then undo pan/zoom. (Mirrors the `canvasLocal` + `screenToWorld` pair at the handles.)
+    func worldFromGlobal(_ global: CGPoint) -> CGPoint {
+        screenToWorld(CGPoint(x: global.x - canvasFrameGlobal.minX,
+                              y: global.y - canvasFrameGlobal.minY))
+    }
+
     /// Zoom while keeping the world point under `screenPoint` fixed (cursor-anchored zoom).
     func zoomToward(_ screenPoint: CGPoint, factor: CGFloat) {
         let newZoom = max(0.2, min(4, zoom * factor))
@@ -477,6 +493,7 @@ final class AppModel: ObservableObject {
         watcher = VaultWatcher(root: vault.root) { [weak self] rels in
             Task { @MainActor in self?.handleDiskChange(rels) }
         }
+        Log.disk.notice("watching vault for external changes: \(vault.root.path, privacy: .public)")
     }
 
     private func stopWatching() { watcher = nil }
@@ -597,6 +614,26 @@ final class AppModel: ObservableObject {
                 return (node, frame.width * frame.height)
             }
             .min { $0.area < $1.area }?.node
+    }
+
+    /// Folder under `point` that box `id` could legally re-file into: the smallest folder
+    /// containing the point, never the box itself or — for a dragged folder — one of its own
+    /// descendants (a folder can't be dropped inside itself). nil → no such folder (drop → root).
+    func reFileFolder(under point: CGPoint, for id: UUID) -> BoardNode? {
+        guard let dragged = node(id),
+              let folder = folderNode(containing: point, excluding: id),
+              !(dragged.kind == .folder && (folder.relPath == dragged.relPath
+                                            || folder.relPath.hasPrefix(dragged.relPath + "/")))
+        else { return nil }
+        return folder
+    }
+
+    /// Folder to highlight live while dragging box `id` over `point` — the re-file target, but
+    /// nil when the box is already in it, so we don't flash its current parent on every jiggle.
+    func dropTargetHighlight(for id: UUID, at point: CGPoint) -> UUID? {
+        guard let folder = reFileFolder(under: point, for: id),
+              folder.relPath != node(id)?.parentRel else { return nil }
+        return folder.id
     }
 
     /// Boxes whose parent folder is exactly `relPath` (one level down).
@@ -828,7 +865,8 @@ final class AppModel: ObservableObject {
 
     /// End a node drag: re-file into a folder if dropped inside one. Records the
     /// reposition AND any disk move as a single undo step.
-    func endDrag(_ id: UUID) {
+    func endDrag(_ id: UUID, at dropPoint: CGPoint) {
+        dropTargetId = nil
         guard let before = interactionBefore,
               let current = node(id),
               let idx = board.nodes.firstIndex(where: { $0.id == id }) else {
@@ -842,7 +880,11 @@ final class AppModel: ObservableObject {
         func relocate(to newDir: String) {
             let name = (current.relPath as NSString).lastPathComponent
             let newRel = newDir.isEmpty ? name : "\(newDir)/\(name)"
-            guard newRel != current.relPath, vault?.exists(newRel) == false else { return }
+            guard newRel != current.relPath else { return }
+            guard vault?.exists(newRel) == false else {
+                NSSound.beep()   // a file with this name already lives in the target — keep it put
+                return
+            }
             let oldRel = current.relPath
             Log.disk.notice("re-file on drop: \(oldRel, privacy: .public) -> \(newRel, privacy: .public)")
             rawMove(oldRel, newRel)
@@ -852,9 +894,9 @@ final class AppModel: ObservableObject {
             if current.kind == .folder { reparentChildren(oldPrefix: oldRel, newPrefix: newRel) }
         }
 
-        if let folder = folderNode(containing: current.center, excluding: id),
-           !(current.kind == .folder && (folder.relPath == current.relPath
-                                         || folder.relPath.hasPrefix(current.relPath + "/"))) {
+        // Re-file by where the cursor dropped, not the box center — so a box can land in a small
+        // nested folder even when the box's own center never reaches it.
+        if let folder = reFileFolder(under: dropPoint, for: id) {
             if folder.relPath != current.parentRel { relocate(to: folder.relPath) }
         } else if current.parentRel != "" {
             relocate(to: "")
