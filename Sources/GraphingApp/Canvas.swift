@@ -709,6 +709,12 @@ struct NodeView: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        // Bound the body's hit-testing to its own frame. Selectable code text in a 2-axis ScrollView
+        // (`CodeView`, with `.fixedSize(horizontal:)`) otherwise reports a hit region as wide as the
+        // longest line — an invisible strip that escapes the visual clip and eats clicks on other
+        // boxes ("can't select anything after expanding the code demo"). `.clipped()` clips interaction.
+        .contentShape(Rectangle())
+        .clipped()
     }
 
     private func toggleCardEdit() {

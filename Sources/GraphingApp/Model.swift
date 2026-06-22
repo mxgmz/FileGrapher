@@ -310,7 +310,16 @@ final class AppModel: ObservableObject {
 
     // Canvas viewport state
     @Published var zoom: CGFloat = 1
-    @Published var pan: CGSize = .zero
+    @Published var pan: CGSize = .zero {
+        // Pan accumulates from raw scroll deltas with no natural bound. A runaway value (or one
+        // derived from an already-corrupt node) would push boxes to ~1e12+ screen coords and pin
+        // WindowServer. Clamp to a range that still reaches any in-bounds box at max zoom, but can
+        // never reach the meltdown zone. Self-assignment here does not re-fire didSet.
+        didSet {
+            let c = CGSize(width: AppModel.clampPan(pan.width), height: AppModel.clampPan(pan.height))
+            if c != pan { pan = c }
+        }
+    }
     @Published var viewport: CGSize = .zero
     var canvasFrameGlobal: CGRect = .zero   // CanvasView frame in window space, for the scroll/zoom monitor
     @Published var didInitView = false
@@ -339,6 +348,57 @@ final class AppModel: ObservableObject {
     static let expandedSize = CGSize(width: 360, height: 320)
 
     // MARK: Coordinate transforms
+
+    // MARK: World bounds (meltdown guard)
+
+    /// Furthest a box center may sit from the world origin. Generous enough for any realistic
+    /// layout, but far below the magnitude (~1e12) where SwiftUI's layout/`.position` math melts
+    /// down and pins WindowServer at 100% CPU. Every coordinate written or loaded is clamped here.
+    static let worldBound: Double = 1_000_000
+    /// Largest pan offset we allow. Reaches any in-bounds box (±`worldBound`) at max zoom (4×) plus
+    /// a viewport's worth of slack, yet stays nowhere near the meltdown zone.
+    static let panBound: Double = 5_000_000
+    /// Box dimensions are clamped to this range — a zero/negative or astronomically large size
+    /// also breaks layout.
+    static let sizeBound: ClosedRange<Double> = 8 ... 50_000
+
+    static func clampCoord(_ v: Double) -> Double {
+        guard v.isFinite else { return 0 }
+        return min(max(v, -worldBound), worldBound)
+    }
+    static func clampPan(_ v: CGFloat) -> CGFloat {
+        guard v.isFinite else { return 0 }
+        return min(max(v, -CGFloat(panBound)), CGFloat(panBound))
+    }
+    static func clampSize(_ v: Double, fallback: Double) -> Double {
+        guard v.isFinite, v > 0 else { return fallback }
+        return min(max(v, sizeBound.lowerBound), sizeBound.upperBound)
+    }
+
+    /// Repair any non-finite / out-of-range geometry already in `board` (e.g. a corrupt board.json
+    /// with runaway coordinates). Returns true if anything was changed. A blunt clamp — it may stack
+    /// previously-exploded boxes near the world edge, but it guarantees the board can always open
+    /// instead of hanging the machine. Run on load; resave when it changes anything.
+    @discardableResult
+    func sanitizeBoardGeometry() -> Bool {
+        var changed = false
+        for i in board.nodes.indices {
+            let n = board.nodes[i]
+            let nx = AppModel.clampCoord(n.x)
+            let ny = AppModel.clampCoord(n.y)
+            let nw = AppModel.clampSize(n.width, fallback: gappDefaultNoteSize.width)
+            let nh = AppModel.clampSize(n.height, fallback: gappDefaultNoteSize.height)
+            if nx != n.x || ny != n.y || nw != n.width || nh != n.height {
+                board.nodes[i].x = nx; board.nodes[i].y = ny
+                board.nodes[i].width = nw; board.nodes[i].height = nh
+                changed = true
+            }
+        }
+        if changed {
+            Log.disk.fault("Sanitized out-of-range board geometry on load (clamped to ±\(Int(AppModel.worldBound), privacy: .public)) — board.json had runaway coordinates.")
+        }
+        return changed
+    }
 
     func worldToScreen(_ p: CGPoint) -> CGPoint {
         CGPoint(x: p.x * zoom + pan.width, y: p.y * zoom + pan.height)
@@ -384,6 +444,7 @@ final class AppModel: ObservableObject {
         let v = Vault(root: url)
         vault = v
         board = v.loadBoard()
+        if sanitizeBoardGeometry() { v.saveBoard(board) }   // self-heal a corrupt board before it can hang
         UserDefaults.standard.set(url.path, forKey: defaultsKey)
         clearHistory()
         syncFromDisk()
@@ -868,6 +929,7 @@ final class AppModel: ObservableObject {
         guard vault != nil else { return }
         let targets = board.nodes.filter { ids.contains($0.id) }
         guard !targets.isEmpty else { return }
+        Log.disk.notice("delete \(targets.count) box(es): \(targets.map(\.relPath).joined(separator: ", "), privacy: .public)")
 
         // Also remove descendants of any deleted folder (their files go with the folder).
         var removeIds = ids
@@ -1068,14 +1130,16 @@ final class AppModel: ObservableObject {
 
     func setPosition(_ id: UUID, to center: CGPoint) {
         guard let idx = board.nodes.firstIndex(where: { $0.id == id }) else { return }
-        board.nodes[idx].center = center
+        board.nodes[idx].center = CGPoint(x: AppModel.clampCoord(center.x),
+                                          y: AppModel.clampCoord(center.y))
     }
 
     func setFrame(_ id: UUID, _ frame: CGRect) {
         guard let idx = board.nodes.firstIndex(where: { $0.id == id }) else { return }
-        board.nodes[idx].width = frame.width
-        board.nodes[idx].height = frame.height
-        board.nodes[idx].center = CGPoint(x: frame.midX, y: frame.midY)
+        board.nodes[idx].width = AppModel.clampSize(frame.width, fallback: gappDefaultNoteSize.width)
+        board.nodes[idx].height = AppModel.clampSize(frame.height, fallback: gappDefaultNoteSize.height)
+        board.nodes[idx].center = CGPoint(x: AppModel.clampCoord(frame.midX),
+                                          y: AppModel.clampCoord(frame.midY))
     }
 
     /// The set of boxes that move together when `id` is dragged. If `id` is part of a multi-selection,

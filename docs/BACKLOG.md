@@ -13,7 +13,15 @@ Scrum-style board. **Status legend:** ✅ done · 🔄 in progress · ⬜ todo �
 **Goal:** make multi-item editing and external-edit awareness feel native.
 
 Committed:
-- ⬜ **Marquee multi-select** — rubber-band on empty canvas; then multi-move and multi-delete.
+- ✅ **Stability: coordinate-meltdown guard (S10)** — node coords/sizes & `pan` are now clamped
+  (`AppModel.worldBound`/`panBound`/`sizeBound`); a corrupt `board.json` self-heals on load
+  (`sanitizeBoardGeometry`). Fixes the 99.9%-CPU / WindowServer hang from runaway x-coords (~1e13).
+  ⬜ *Follow-up:* trace & plug the source that first seeds a large coordinate (suspect `pan` drift →
+  `screenToWorld` on double-click-add / drop-refile).
+- ✅ **Marquee multi-select** — rubber-band on empty canvas; then multi-move and multi-delete.
+  *(found already fully implemented S10: `marqueeGesture`/`applyMarqueeSelection`/`marqueeOverlay` in
+  Canvas.swift, + Shift-drag-adds, + multi-move via `dragGroup`, + multi-delete. Reviewed correct
+  end-to-end; **pending Max's visual verify** before closing.)*
 - ⬜ **Live file-watching** — detect notes/folders created or deleted in Obsidian/Finder and
   reconcile without the manual ↻ (DispatchSource/FSEvents on the vault root).
 - ⬜ **Fix:** ⌘Z while editing a box title should undo the *text*, not the board.
@@ -31,8 +39,8 @@ strength. User explicitly requested: **editable connectors**, **editable text si
   trash) and ✅ connector (color, style, arrowhead, delete) menus shipped (S2); ⬜ empty-canvas menu
   (paste / select-all / new note) still todo.
 - ✅ **Click empty canvas to deselect** — clears box + connector selection. *(S2)*
-- ⬜ **Shift-click to add/remove from selection** — hand-pick boxes without a marquee.
-- ⬜ **Select all (⌘A)** — select every box.
+- ✅ **Shift-click to add/remove from selection** — hand-pick boxes. *(found implemented S10, `select()` in Canvas.swift; needs Max visual verify)*
+- ✅ **Select all (⌘A)** — select every box. *(found implemented S10, `handleKey` case "a"; needs Max visual verify)*
 - ⬜ **Duplicate (⌘D / ⌥-drag)** — copy a box in place or by option-drag. *(Open Q: duplicating a
   note should create a real second `.md` with a "copy" suffix?)*
 - ✅ **Copy / cut / paste boxes (⌘C/⌘X/⌘V)** — disk-aware: copy duplicates files ("… copy"),

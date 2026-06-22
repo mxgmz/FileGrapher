@@ -43,6 +43,82 @@ existing cwd). **No Xcode** → SwiftPM only. **Can't screenshot** in-env. Demo 
 
 ---
 
+## 2026-06-21 — Session 11 — finding: "Marquee multi-select" is already built
+**Context:** picked Sprint 2's next item, Marquee multi-select. On inspection the **entire feature is
+already implemented** in `Canvas.swift` and was just never verified/ticked:
+- Marquee: `marqueeStart/Current/Base` state + `marqueeGesture` (DragGesture ≥4px on `background`,
+  `.local`), `applyMarqueeSelection` (screen→world rect, selects nodes whose `effectiveFrame`
+  intersects), `marqueeOverlay` (accent rubber-band). Shift-drag is additive (`marqueeBase`).
+- Shift-click toggle: `NodeView.select()`. Select-all: `handleKey` ⌘A. Multi-move: node `dragGesture`
+  via `model.dragGroup(for:)` (folders carry descendants, one move per id, no double-move).
+  Multi-delete: `delete(model.selection)`. Multi copy/cut: `clipboardEntries(from: selection)`.
+- Layering checked: `world` ZStack has no fill/contentShape, so empty-canvas drags fall through to the
+  marquee; keyboard handler bails (`return event`) while editing a title / text field is first responder,
+  so ⌘A/Delete don't fire mid-type. Reviewed correct end-to-end.
+
+**State:** builds clean, app alive. **Owe Max a 60-sec visual pass** (marquee a few boxes → all
+highlight; drag one → group moves; Delete → all gone, ⌘Z restores; Shift-click toggles; ⌘A selects all).
+Backlog ticked ✅ *pending that visual verify*. **Next:** if it checks out, take Sprint 2's **live
+file-watching** or the **S10 coord-jump root-cause**; if a marquee bug shows up, fix it.
+
+**Bug fix (S11) — "after expanding the code demo it won't let me select anything else":** this was the
+lingering half of S9's "seized my view" (S9 fixed pan; selection/clicks were still stuck near a card).
+Root cause hypothesis: `CodeView`'s selectable code text (`.textSelection(.enabled)` + `.fixedSize(horizontal:)`
+in a 2-axis `ScrollView`) reports a hit region as wide as the longest line — an invisible strip that
+escapes the card's visual clip and eats clicks on boxes beside it. **Fix:** bound the expanded card body's
+hit-testing to its frame via `.contentShape(Rectangle())` + `.clipped()` on `cardBody` (Canvas.swift ~711).
+Low-risk, enforces the correct invariant (a card never captures input outside its own box) for all card
+types. **Pending Max's verify**: expand the code card → click other boxes → they should select now. If
+still stuck, the cause is instead the expanded-node `including: .subviews` gesture mask — instrument
+`select()`/marquee and reproduce.
+
+---
+
+## 2026-06-21 — Session 10 — fix: runaway coordinates pinned the CPU / hung WindowServer ("crashed again")
+**Symptom (user):** app "crashed again" — three screenshots showed **GraphingApp at 99.9% CPU**,
+WindowServer "experienced a problem", and the Dock crash-looping every ~10s. Not a clean crash: a
+**runaway compute/layout spin** that starved WindowServer. No GraphingApp `.ips` (it spun, didn't crash).
+
+**Root cause:** `board.json` held **astronomically large x-coordinates** — `Untitled.md` at x ≈ **-1.5e13**
+and the whole `Folder 4` / `Folder 7` cluster at x ≈ **-1.26e12** (y was fine; only x exploded; 3/31
+nodes were sane). SwiftUI laying out / `.position()`-ing views at 1e12–1e13 pins the CPU and drags
+WindowServer down. The grid-loop and folder-recursion spins were already guarded (S-earlier) — this was
+a **new vector: unbounded coordinate values** reaching the renderer. Likely seeded by an absolute
+placement (`screenToWorld` on double-click / re-file) while `pan` had drifted large; pan was never clamped.
+
+**Fix (code, `Model.swift`):** made out-of-range geometry impossible to render:
+- `AppModel.worldBound = 1_000_000`, `panBound = 5_000_000`, `sizeBound = 8…50_000` + static
+  `clampCoord` / `clampPan` / `clampSize` helpers.
+- `pan` now clamps in a `didSet` (covers the scroll handler + zoomToward + centering).
+- `setPosition` / `setFrame` clamp every written coordinate & size.
+- `sanitizeBoardGeometry()` runs in `openVault` after load and **resaves if it changed anything** — a
+  corrupt board now self-heals (blunt clamp to ±worldBound) instead of hanging the machine.
+
+**Recovery (live vault `/Users/maxgomez/Documents/Graph test/`):** backed up board.json
+(`board.json.bak-20260621-212559`), then **layout-preservingly** repaired the 19 runaway nodes — shifted
+the Folder 4/Folder 7 cluster as a rigid body to centroid x≈120k (internal arrangement intact), parked the
+lone -1.5e13 note at origin. All 31 nodes now within ±1e6.
+
+**Follow-up — "you made everything huge":** the layout-preserving repair parked the Folder 7 cluster at a
+new centroid but left `Folder 7/test` at its old sane spot, and the user had since drag-refiled notes into
+Folder 7 — so its children were scattered ~100k apart AND its **stored** frame had been inflated to
+101329×102728 (auto-grow never shrinks below the stored frame). Net: a 100k×100k folder box = "huge."
+Fix (board.json only, app quit first so writes stick): repacked Folder 7's direct children beneath the
+intact Folder 6 subtree (folders moved as rigid bodies) **and reset Folder 7's stored frame to 340×230
+centered on its children**. Folder 7 now auto-grows to **2170×1491** (normal); no folder >4000px.
+
+**Verified:** `swift build` + `./build-app.sh debug` clean; relaunched → CPU settles to **~0–7%** at rest
+(initial ~60% was first-render of 35 nodes + 3 expanded cards, not a loop); board.json = 0 out-of-bounds,
+Folder 7 stored 340×230. Meltdown + giant folder gone. **Backups:** `board.json.bak-*` in `.graphingapp/`.
+**Visual pass still owed to Max** (per verification debt): confirm boxes appear where expected and Folder 7
+contents look right.
+
+**Next up:** find the exact arithmetic that first seeds a large coordinate (suspect `pan` drift feeding
+`screenToWorld` on double-click-add / drop-refile) — the clamps make it non-fatal, but plugging the source
+would stop boxes ever jumping. Otherwise resume Sprint 2 (marquee multi-select / live file-watching).
+
+---
+
 ## 2026-06-21 — Session 9 — fix: expanded card froze the canvas ("seized my view")
 **Symptom (user):** edited a note, filed it into Folder 6, expanded it (worked), then the canvas was
 stuck — couldn't pan/move to anything else; the card "seized the view." (Board had **two** expanded
