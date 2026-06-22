@@ -5,7 +5,162 @@ open questions. At a session's start, read the top entry to pick up where we lef
 
 ---
 
-## 📍 PICK UP HERE — checkpoint (2026-06-21, end of Sessions 1–9)
+## 📍 PICK UP HERE — Session 13 (PLAN ONLY, not built) — re-file bug + snappy resize + no-overlap hitboxes
+
+> Brainstormed with Max 2026-06-21. **No code written yet — this is the build plan.** Three asks, one
+> underlying primitive: a box **hitbox** (= its `effectiveFrame`) + a no-overlap rule. Build in the
+> order below; each step de-risks the next. Line numbers are *current-as-of-writing* — **grep the
+> symbol, not the number** (`Model.swift` is actively changing).
+
+**⚠️ Guardrails — do not break:**
+- Every geometry mutation goes through the undo engine: `transaction {}` or
+  `beginInteraction()`→`endInteraction()`/`endDrag()`. Never mutate `board.nodes[i]` outside it, or
+  undo/redo + disk desync. (`// MARK: Undo / redo`.)
+- Coords/sizes are clamped on write (`clampCoord`/`clampSize`, S10 meltdown guard). Reuse those for any
+  geometry you compute — don't write raw values that could re-enter the ±1e6 meltdown zone.
+- Render in screen space (× zoom); never `.scaleEffect` a node.
+- **New cross-feature risk (Living Canvas):** connectors are now real `[[wikilinks]]` written into files
+  (`Links.swift` / `ManagedLinks`). **Re-filing or renaming a note changes its path** → a wikilink in
+  *another* file pointing at it can go stale. WS1/WS3 must not silently break links — at minimum test a
+  connected pair before/after a move and leave a TODO if link-rewrite is out of scope.
+- Verify each step: `./build-app.sh debug`, then Max does the visual pass (env can't screenshot).
+  Live vault `/Users/maxgomez/Documents/Graph test/` (~26 nodes, 7 folders).
+
+**Open decisions — confirm with Max before coding the affected WS (recommendation in *italics*):**
+1. WS1 re-file target = box **center** (today) vs *cursor / max-overlap*.
+2. WS2 "snappy" = *collision-snap to contents* vs grid-snap.
+3. WS3 overlap resolution = block / push / *soft-snap on drop, siblings-only*.
+
+---
+
+### WS1 — Re-file bug: can't move a file from folder 6 into nested folder 7 (do FIRST — low risk, high value)
+
+**Root cause** (read `endDrag`, Model.swift ≈772–805):
+- Target = `folderNode(containing: current.center, excluding: id)` (≈796): the dragged box's **center**
+  must land inside 7's grown frame, with **no highlight** of the pending target → fiddly + invisible.
+- Center in 6 but not 7 → `folder.relPath == current.parentRel` → does nothing (≈799); the root-fallback
+  `else if` (≈800) can't fire because a folder *did* contain it.
+- Same-name target → `relocate` bails on `vault?.exists(newRel) == false` (≈786) **silently** (no beep).
+
+**Steps:**
+1. **Target by cursor, not center.** Thread the drop point from `dragGesture.onEnded` (Canvas.swift ≈910–916)
+   into `endDrag`; pick the folder under the cursor (or the one the dragged box overlaps most). Keep the
+   `excluding: id` self-exclude and the folder-into-own-descendant guard (≈797–798).
+2. **Live drop-target highlight.** Reuse the connector precedent — `pendingConnect.hoverTarget` draws an
+   outline (Canvas.swift ≈388–395) set during `connectDrag` (≈467–481). Add `@Published dropTargetId: UUID?`,
+   set in `dragGesture.onChanged`, render an outline, clear onEnded.
+3. **Audible block.** In `relocate`, when the name exists, `NSSound.beep()` (precedent: `rename`, grep
+   `NSSound.beep`).
+
+**Touched:** `Model.swift` (`endDrag`; `folderNode`/`smallestBox` ≈531–555; new `@Published dropTargetId`
+by the viewport state ≈310). `Canvas.swift` (`dragGesture` ≈887–917; new highlight mirroring
+`pendingConnector` ≈377–399).
+**Risks:** border drops mis-routing — keep both guards. Don't thrash `dropTargetId` (set only on change →
+no re-render jank). Link staleness (guardrails).
+**Verify:** 6→7 lands in 7; drag to empty canvas → root; same-name target beeps + stays put; folder can't
+drop into itself/descendant; one ⌘Z reverses move + reposition together.
+
+---
+
+### WS2 — Snappy (container) folder resize — stop rescaling contents
+
+**Now:** `applyFolderResize` (Model.swift ≈1181) scales every descendant's size+position by the resize
+ratio = the "resizes everything at once" Max dislikes. `ResizeHandle` (Canvas.swift ≈963–1021) snapshots
+`childStart` and calls it for folders.
+**Want:** resize moves only the folder frame; children stay put; inward shrink **snaps to the contents'
+bounding box** (already can't draw smaller — `effectiveFrame` auto-grow).
+
+**Steps:**
+1. In the folder branch of `ResizeHandle` (≈1010–1013) call `setFrame` instead of `applyFolderResize`;
+   delete the now-unused `childStart` snapshot (≈968, 982–985). Children stop moving.
+2. **Clamp inward** so the dragged corner can't cross `contentsBounds + folderPadding + folderHeaderHeight`
+   (constants Model.swift ≈337–341). Add a small `contentsBounds(of:)` next to `effectiveFrame` (union of
+   `directChildren` effective frames) and clamp `newFrame` to enclose it.
+3. (Only if Max picks grid-snap) round the dragged edge to an N-pt grid.
+4. Delete `applyFolderResize` if nothing else calls it (grep first).
+
+**Touched:** `Model.swift` (`applyFolderResize` ≈1181; maybe new `contentsBounds`). `Canvas.swift`
+(`ResizeHandle` ≈963–1021).
+**Risks:** an **empty** folder must still shrink to `folderMinSize` (200×150). Don't touch
+drag-moves-contents (`dragGesture`/`dragGroup`) — different path. Confirm one resize = one ⌘Z after removing
+`childStart`.
+**Verify:** grow → kids stay, empty space added; shrink → stops at kids' edge; empty folder → min; one ⌘Z reverses.
+
+---
+
+### WS3 — No-overlap hitboxes (do LAST — biggest blast radius)
+
+**Want:** "every card has a hitbox, no files on top of each other." Recommended shape (confirm decision 3):
+**soft-snap on drop, siblings-only.**
+- Hitbox = `effectiveFrame` (AABB); overlap = `rect.intersects`. n² is nothing at this scale.
+- Scope = **siblings** (same `parentRel`). A folder *must* contain its children — only sibling-vs-sibling
+  overlap is illegal.
+- On drop (in `endDrag`, **after** re-file since that changes `parentRel`), overlap → nudge to nearest free
+  spot (spiral search) or refuse + snap back. Live drag stays free.
+
+**Steps:**
+1. Add `overlapsSibling(_:)` + `nearestFreeCenter(for:near:)` near the lookups (Model.swift ≈520–555),
+   `effectiveFrame` + same-`parentRel` filter.
+2. Call at drop time inside `endDrag`'s `commit`/`transaction` so the nudge is one undo step.
+3. **Do NOT enforce on load** — existing boards overlap; a global "settle" would yank Max's layout. New
+   moves/resizes only.
+
+**Touched:** `Model.swift` (new helpers; hook `endDrag`; maybe resize-end for folder-vs-sibling).
+`Canvas.swift` only if adding a "can't drop here" tint.
+**Risks:** highest — depends on WS1 (drop point) + WS2 (resize). Folder auto-grow makes hitboxes dynamic →
+a resolved spot can re-collide; cap the search, accept "good enough." Never enforce parent↔child. Nudge
+must share the drag's undo step.
+**Verify:** drop onto a sibling → slides to nearest gap; can't end overlapping a sibling; folders still
+contain kids; loading an already-overlapping board does NOT reshuffle; one ⌘Z reverses the whole gesture.
+
+---
+
+## 2026-06-21 — Session 12 — Living Canvas Phase 1: connector → real `[[wikilink]]` (write side)
+**Ask:** start Sprint 3 / Living Canvas Phase 1 — make a connector a real link in the file.
+
+**What shipped (the write side of the spine):**
+- **New `Sources/GraphingApp/Links.swift` — `ManagedLinks`.** Pure, Foundation-only read/write of the
+  app-owned `<!-- canvas-links -->` block: `targets(in:)` parses the wikilinks listed in the block
+  (strips `[[A|alias]]` / `[[A#heading]]`); `write(_:into:)` rewrites *only* between the markers
+  (deduped, order-preserved), appends a clean block with a single blank-line seam when none exists, and
+  removes the block (collapsing the seam) when the list goes empty. **Never touches user prose.**
+- **Wired into the model.** New `AppModel.rewriteFile(_:_:)` applies a text transform and records the
+  write on the active transaction's `txnFileUndo/Redo` — so the file change rides the **existing paired
+  board+disk undo engine** (one ⌘Z reverses both). New `writeLink`/`removeLink` (+ `isLinkable` =
+  markdown note) called from `connect` (manual connect), `spawn` (`+`-handle sibling), and `deleteEdge`.
+  Drawing A→B writes `- [[B-name]]` into A.md's block; deleting the edge removes that line. Folder/CSV/
+  code edges stay visual-only (no-op). `board.edges` is **still** the drawn source of truth this session.
+
+**Verified:** `swift build` + `./build-app.sh debug` clean; app launches & idles at **0% CPU** (no
+meltdown). **Headless-tested the pure transform** — concatenated the real `Links.swift` with an assert
+harness and ran via `swift`: **12/12 pass** (empty-file append, prose seam w/ & w/o trailing `\n`,
+in-place update keeping surrounding prose, end + mid-file removal w/ seam collapse, dedup, no-op,
+alias/heading strip, round-trip, add-then-remove). Live vault has no pre-existing `canvas-links` blocks
+(clean slate).
+
+> ⚠️ **OWE MAX A VISUAL/DISK VERIFY** (can't draw an edge headlessly here). On the live vault
+> `/Users/maxgomez/Documents/Graph test/`:
+> 1. Connect two **distinctly-named** notes — drag from one note's `+` handle onto another (suggest
+>    **`Peek demo`** → **`HI`**, both unique basenames). Then check `Peek demo.md` on disk — it should
+>    gain a `<!-- canvas-links -->` block listing `- [[HI]]`, with your existing text untouched.
+> 2. Open `Peek demo` in **Obsidian** → the link should be live/clickable.
+> 3. **⌘Z** → the block disappears and the edge is gone (board + disk reversed together). **⇧⌘Z** re-adds.
+> 4. Delete the connector (click line → Delete) → the `[[HI]]` line is removed from the block.
+> 5. Spawn a sibling note via a note's `+` handle → the source note's block gains `[[Untitled…]]`.
+
+**Next up (read side — next increment):** in `syncFromDisk`, parse every `.md` note's wikilinks and
+**reconcile into `board.edges`** (auto-draw an edge for a link present on disk; drop a link-backed edge
+whose link vanished; leave folder/code visual edges alone). Resolve `[[name]]` → node by basename —
+**mind the many `Untitled` collisions** in the live vault (may need path-qualified `[[folder/name]]` or
+a nearest-match rule). Then live file-watching (FSEvents + self-write suppression) and the reload banner.
+
+**Known limitations (acceptable for the write-side increment):** rename of a note doesn't yet update
+incoming `[[oldname]]` links elsewhere (Obsidian-style link-update is out of scope); deleting a node
+leaves dangling incoming links (as Obsidian does); basename ambiguity is a read-side problem, deferred.
+
+---
+
+## 2026-06-21 — checkpoint (end of Sessions 1–9) — MVP feature inventory & verification debt
 
 **State:** Working, fairly polished MVP. `swift build` + `./build-app.sh debug` clean; app launches and
 runs against the live vault `/Users/maxgomez/Documents/Graph test/`. Files: `App.swift`, `Model.swift`,
@@ -71,6 +226,16 @@ Low-risk, enforces the correct invariant (a card never captures input outside it
 types. **Pending Max's verify**: expand the code card → click other boxes → they should select now. If
 still stuck, the cause is instead the expanded-node `including: .subviews` gesture mask — instrument
 `select()`/marquee and reproduce.
+
+**Direction set (S11) — the "Living Canvas" vision:** long brainstorm with Max produced a full spec,
+[`docs/VISION-living-canvas.md`](VISION-living-canvas.md). Core thesis: *a connector is a real link in the
+file* → the canvas and vault become one live graph; a spatial, real-time, agent-collaborative front-end to
+plain markdown. Locked decisions: links live in a managed `<!-- canvas-links -->` block (manually drawable;
+style in board.json); live file-watching makes it bidirectional; concurrency = block-scoped **soft-lock** +
+non-overlapping blocks **flow live** + one localized conflict ghost; the ghost overlay is the safe face of
+live-overwrite and seeds a git **time-travel loupe**; guiding aesthetic **"alive but sober."** **Phase 1 is
+now the next sprint** ("Sprint 3 · Living Canvas Phase 1" in BACKLOG): connector→`[[wikilink]]` round-trip +
+read-side auto-draw + live file-watching, no git required. Finish marquee/multi-select visual verify first.
 
 ---
 
