@@ -3,6 +3,11 @@ import AppKit
 
 let gappSpring = Animation.spring(response: 0.30, dampingFraction: 0.78)
 
+/// Below this zoom the selection chrome (`+` spawn handles + corner resize handles) is hidden — at far
+/// zoom-out the fixed-pixel handles pile on top of each other and the box. The selection *outline*
+/// (drawn by `NodeView`) stays so the box still reads as selected. (DESIGN §8, locked 2026-06-23.)
+let gappChromeMinZoom: CGFloat = 0.5
+
 struct CanvasView: View {
     @EnvironmentObject var model: AppModel
 
@@ -459,16 +464,20 @@ struct CanvasView: View {
         if model.selection.count == 1,
            let id = model.selection.first,
            let node = model.node(id),
-           model.editingId != id {
+           model.editingId != id,
+           model.zoom >= gappChromeMinZoom {   // far zoom-out: outline only, no piled-up handles (T3)
             let f = model.effectiveFrame(of: node)
             let center = model.worldToScreen(CGPoint(x: f.midX, y: f.midY))
             let halfW = f.width / 2 * model.zoom
             let halfH = f.height / 2 * model.zoom
-            let off: CGFloat = 18
-            HandleButton(direction: .up, node: node).position(x: center.x, y: center.y - halfH - off)
-            HandleButton(direction: .down, node: node).position(x: center.x, y: center.y + halfH + off)
-            HandleButton(direction: .left, node: node).position(x: center.x - halfW - off, y: center.y)
-            HandleButton(direction: .right, node: node).position(x: center.x + halfW + off, y: center.y)
+            // `+` sits this far OUTSIDE the box edge. Clamp to a screen-pixel range so a small/zoomed-out
+            // box doesn't have its four handles overlapping each other or covering the box; a large one
+            // doesn't fling them miles away. Floor keeps the 24px button clear of the box edge + corners.
+            let spawnOffset = min(28, max(16, min(halfW, halfH) * 0.6))
+            HandleButton(direction: .up, node: node).position(x: center.x, y: center.y - halfH - spawnOffset)
+            HandleButton(direction: .down, node: node).position(x: center.x, y: center.y + halfH + spawnOffset)
+            HandleButton(direction: .left, node: node).position(x: center.x - halfW - spawnOffset, y: center.y)
+            HandleButton(direction: .right, node: node).position(x: center.x + halfW + spawnOffset, y: center.y)
 
             // Corner resize handles (notes and folders alike).
             ResizeHandle(node: node, corner: .topLeft)
@@ -501,7 +510,10 @@ struct HandleButton: View {
             .shadow(color: .black.opacity(0.18), radius: 2, y: 1)
             .scaleEffect(hover ? 1.14 : 1)
             .contentShape(Circle())
-            .onHover { hover = $0 }
+            .onHover { inside in
+                hover = inside
+                if inside { NSCursor.crosshair.push() } else { NSCursor.pop() }
+            }
             .onTapGesture {
                 withAnimation(gappSpring) { model.spawn(from: node, direction: direction) }
             }
@@ -698,6 +710,7 @@ struct NodeView: View {
                 }
             }
             .overlay(alignment: .topTrailing) { if node.kind == .note && !node.isExpanded { expandChevron } }
+            .overlay { hoverOutline }
             .contentShape(Rectangle())
             .gesture(dragGesture, including: mask)
             .gesture(
@@ -714,6 +727,18 @@ struct NodeView: View {
             .animation(.easeInOut(duration: 0.12), value: hovering)
     }
 
+    /// On hover, trace the box's exact hitbox so you can see what you'll hit before clicking (T1).
+    /// Suppressed while selected (the selection border already outlines it) or editing.
+    @ViewBuilder
+    private var hoverOutline: some View {
+        if hovering && !isSelected && !isEditing {
+            let radius = (node.kind == .folder ? 14 : 12) * scale
+            RoundedRectangle(cornerRadius: radius)
+                .stroke(node.accent.opacity(0.45), lineWidth: 1.5 * scale)
+                .allowsHitTesting(false)
+        }
+    }
+
     /// Hover affordance: a small button that expands the note into an in-place content card.
     private var expandChevron: some View {
         Button { withAnimation(gappSpring) { model.toggleExpand(node.id) } } label: {
@@ -727,6 +752,7 @@ struct NodeView: View {
         .buttonStyle(.plain)
         .opacity(hovering ? 1 : 0)
         .padding(6 * scale)
+        .onHover { inside in if inside { NSCursor.pointingHand.push() } else { NSCursor.pop() } }
         .help("Expand into a card")
     }
 
@@ -818,6 +844,9 @@ struct NodeView: View {
         .frame(maxWidth: .infinity)
         .background(node.accent.opacity(0.12))
         .contentShape(Rectangle())
+        .onHover { inside in               // header is the drag handle → open-hand cursor (T1)
+            if inside { NSCursor.openHand.push() } else { NSCursor.pop() }
+        }
         .gesture(dragGesture)              // header is the drag handle
         .onTapGesture { select() }
     }
@@ -1141,6 +1170,21 @@ struct InlineTitle: View {
 
 enum Corner { case topLeft, topRight, bottomLeft, bottomRight }
 
+/// macOS has no *public* diagonal-resize cursor, so we reflect the standard private window-resize
+/// cursors (the same ones Finder/most apps use for corner resize). Falls back to the public
+/// crosshair if a future OS drops the selector — chrome only, so a graceful degrade is fine.
+private func gappDiagonalResizeCursor(for corner: Corner) -> NSCursor {
+    let selectorName = (corner == .topLeft || corner == .bottomRight)
+        ? "_windowResizeNorthWestSouthEastCursor"
+        : "_windowResizeNorthEastSouthWestCursor"
+    let selector = NSSelectorFromString(selectorName)
+    if NSCursor.responds(to: selector),
+       let cursor = NSCursor.perform(selector)?.takeUnretainedValue() as? NSCursor {
+        return cursor
+    }
+    return .crosshair
+}
+
 struct ResizeHandle: View {
     @EnvironmentObject var model: AppModel
     let node: BoardNode
@@ -1154,6 +1198,9 @@ struct ResizeHandle: View {
             .frame(width: 12, height: 12)
             .shadow(color: .black.opacity(0.2), radius: 1.5, y: 1)
             .contentShape(Rectangle())
+            .onHover { inside in
+                if inside { gappDiagonalResizeCursor(for: corner).push() } else { NSCursor.pop() }
+            }
             .gesture(
                 DragGesture(minimumDistance: 1, coordinateSpace: .global)
                     .onChanged { v in
