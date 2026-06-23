@@ -26,12 +26,17 @@ struct GraphingAppApp: App {
                 .keyboardShortcut("n", modifiers: [.command, .shift])
             }
             CommandGroup(replacing: .undoRedo) {
-                Button("Undo") { model.performUndo() }
+                // ⌘Z / ⇧⌘Z must undo the *text field's* typing while a title (or card body) is being
+                // edited — not the board. The canvas key monitor already bails for a focused field; this
+                // menu command was the one board-undo path that wasn't first-responder-aware (the leak).
+                // No `.disabled` gate: field-focus isn't a SwiftUI-observable dependency, so a stale
+                // `.disabled` could swallow ⌘Z right when a field starts editing on an empty board. The
+                // routed closure is no-op-safe either way (field checks canUndo; performUndo/Redo guard
+                // an empty stack), so leaving the items always enabled is correct, not just lazy.
+                Button("Undo") { FieldEditor.undoIfEditing(else: model.performUndo) }
                     .keyboardShortcut("z", modifiers: .command)
-                    .disabled(!model.canUndo)
-                Button("Redo") { model.performRedo() }
+                Button("Redo") { FieldEditor.redoIfEditing(else: model.performRedo) }
                     .keyboardShortcut("z", modifiers: [.command, .shift])
-                    .disabled(!model.canRedo)
             }
         }
     }
@@ -53,6 +58,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 extension Notification.Name {
     static let newNote = Notification.Name("gapp.newNote")
     static let newFolder = Notification.Name("gapp.newFolder")
+}
+
+// MARK: - First-responder-aware undo
+
+/// Routes ⌘Z / ⇧⌘Z to the focused text field's *own* undo manager while a title rename or card
+/// body is being edited, so typing is undone field-locally instead of mutating the board. When no
+/// field editor is first responder, the caller's board undo/redo runs instead.
+enum FieldEditor {
+    /// The undo manager of the field editor (`NSTextView`) currently editing a SwiftUI TextField.
+    /// `NSTextView` is the field editor SwiftUI's TextField focuses; only it carries the per-field
+    /// typing undo we want to route to.
+    private static var current: UndoManager? {
+        (NSApp.keyWindow?.firstResponder as? NSTextView)?.undoManager
+    }
+
+    static var isEditing: Bool { current != nil }
+
+    static func undoIfEditing(else boardUndo: () -> Void) {
+        if let undoManager = current { if undoManager.canUndo { undoManager.undo() } }
+        else { boardUndo() }
+    }
+
+    static func redoIfEditing(else boardRedo: () -> Void) {
+        if let undoManager = current { if undoManager.canRedo { undoManager.redo() } }
+        else { boardRedo() }
+    }
 }
 
 // MARK: - Root
