@@ -153,7 +153,7 @@ render/hit-test/marquee); never enforce collision on load; headless-test pure ge
 
 ---
 
-- ⬜ **T1 — Hover & cursor feedback** *(low risk, do first — biggest perceived-quality/effort ratio)*
+- ✅ **T1 — Hover & cursor feedback** *(low risk, do first — biggest perceived-quality/effort ratio)*
   - **Do:** on hover, outline the exact hitbox so you see what you'll hit before clicking; set an
     `NSCursor` per region — open-hand over a drag handle, diagonal-resize over a corner, crosshair over a
     `+` spawn handle, pointing-hand over a button, arrow over a body.
@@ -164,7 +164,7 @@ render/hit-test/marquee); never enforce collision on load; headless-test pure ge
   - **Verify:** hover note/folder-header/corner/`+`/button → correct outline + cursor; leaving restores arrow.
   - **Deps:** none.
 
-- ⬜ **T2 — Folder = frame hitbox** *(🔒 keystone — high risk, do early & carefully; unblocks T5/T6)*
+- ✅ **T2 — Folder = frame hitbox** *(🔒 keystone — high risk, do early & carefully; unblocks T5/T6)*
   - **Do:** split the folder's live region — **header bar** drags/moves the folder; **border ring**
     (~8px) resizes/selects; **interior** drag = **marquee its children**, click = select folder,
     double-click = new note (unchanged). Interior is no longer a move handle.
@@ -181,7 +181,7 @@ render/hit-test/marquee); never enforce collision on load; headless-test pure ge
     clickable/draggable on top; one ⌘Z reverses a header-move.
   - **Deps:** none (but everything below assumes it).
 
-- ⬜ **T3 — Selected-box chrome: scale & declutter** *(low risk, independent)*
+- ✅ **T3 — Selected-box chrome: scale & declutter** *(low risk, independent)*
   - **Do:** clamp the four `+` handles and four resize corners to a screen-pixel size range so they never
     pile up when a box is small or zoomed out; hide the selection chrome entirely below a zoom threshold
     (~0.5×); thin the always-four `+` toward hover-side / fewer.
@@ -192,7 +192,7 @@ render/hit-test/marquee); never enforce collision on load; headless-test pure ge
     hides cleanly below threshold.
   - **Deps:** none.
 
-- ⬜ **T4 — Collision = push, with Pin** *(🔒 central new behavior — med-high risk)*
+- ✅ **T4 — Collision = push, with Pin** *(🔒 central new behavior — med-high risk)*
   - **Do:** new `BoardNode.pinned`. On drop (and on expand/resize-end), instead of snapping the *mover*
     away, **keep it and push overlapped siblings** along the min-translation vector, cascading, until no
     sibling hitboxes intersect. **Pinned** boxes don't move, can't be dragged (lock cursor), and act as
@@ -212,7 +212,7 @@ render/hit-test/marquee); never enforce collision on load; headless-test pure ge
   - **🔒 Decided:** push **on-drop** (not live during drag) — DESIGN §2/§8.
   - **Deps:** T2 (stable folder frames) recommended.
 
-- ⬜ **T5 — Folder collapse + empty hint** *(med risk; resize-no-rescale already done)*
+- ✅ **T5 — Folder collapse + empty hint** *(med risk; resize-no-rescale already done)*
   - **Do:** new `BoardNode.collapsed`. A disclosure ▸ in the header hides children on the canvas and
     shrinks the frame to header + an "N items" count badge. Empty folders show a faint
     "double-click or drag notes here" hint.
@@ -226,7 +226,7 @@ render/hit-test/marquee); never enforce collision on load; headless-test pure ge
     dragging a collapsed folder moves the whole subtree; marquee can't grab hidden children; one ⌘Z reverses.
   - **Deps:** T2.
 
-- ⬜ **T6 — Expandable folders + card polish** *(med risk)*
+- ✅ **T6 — Expandable folders + card polish** *(med risk)*
   - **Do:** folders get the note's ⤢ expand into an editable **folder-note** card; remember card size
     across collapse (`BoardNode.cardSize` — today it snaps back to default); clearer edit/preview state;
     **double-click the card header to rename**.
@@ -243,7 +243,7 @@ render/hit-test/marquee); never enforce collision on load; headless-test pure ge
   - **🔒 Decided:** folder-note = **`<FolderName>.md` inside the folder** (Obsidian convention), lazy-created on first edit.
   - **Deps:** T2, T4.
 
-- ⬜ **T7 — Connector polish** *(med risk; independent, lowest priority)*
+- ✅ **T7 — Connector polish** *(med risk; independent, lowest priority)*
   - **Do:** draggable connector **endpoints** (re-route to a different box), optional **label**, and a
     hover-highlight of the (already 18px) hit zone.
   - **Files:** `Canvas.swift` (`EdgeLine` hover + endpoint handles when selected + label). `Model.swift`

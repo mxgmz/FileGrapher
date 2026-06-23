@@ -5,35 +5,44 @@ open questions. At a session's start, read the top entry to pick up where we lef
 
 ---
 
-## ▶ NEXT SESSION — START HERE · S21 spawned **4 parallel lane-agents → 4 OPEN PRs** (review/merge train pending)
+## ▶ NEXT SESSION — START HERE · S22 ran the **merge train: all 4 Sprint-5 PRs merged to `main`** (T1–T7 done)
 
-**State for next session: review + merge the 4 Sprint-5 PRs.** All authoring lanes are done and pushed as
-OPEN PRs against `main` (baseline `b26c289`); **none merged** — the serial review + merge train is the
-next-session job. Worktrees still exist under `.claude/worktrees/` (prune after merge).
+**State: Sprint 5 T1–T7 are integrated on `main` (F→C→H→E, squash-merged #8 #7 #5 #6), build clean, app
+launches 0.8% CPU.** Worktrees pruned, `s5-*` branches deleted (local + remote). **Only T8 (micro-polish,
+cosmetic sweep) remains** — the once-planned "Lane P". BACKLOG T1–T7 ticked ✅, T8 still ⬜.
 
-| Lane | PR | Branch | Tickets | Verify (headless) |
-|---|---|---|---|---|
-| **F — Folders** (keystone) | **#8** | `s5-folders` | T2 frame model · T5 collapse · T6 expandable folder-notes | pass (collapse/hidden/folder-note) |
-| **C — Collision & Pin** | **#7** | `s5-collision` | T4 push-on-drop + pin | 14/14 |
-| **H — Chrome & feel** | **#5** | `s5-chrome` | T1 hover/cursors · T3 handle scaling | (view-only) |
-| **E — Connectors** | **#6** | `s5-connectors` | T7 re-route + labels + hover | 14/14 |
+| Lane | PR (MERGED) | Tickets | squash commit |
+|---|---|---|---|
+| **F — Folders** (keystone) | #8 | T2 frame · T5 collapse · T6 expandable folder-notes | `fa8958e` |
+| **C — Collision & Pin** | #7 | T4 push-on-drop + pin | `c3f63e1` |
+| **H — Chrome & feel** | #5 | T1 hover/cursors · T3 handle scaling | `08f2624` |
+| **E — Connectors** | #6 | T7 re-route + labels + hover | `ceff84a` |
 
-**Merge train order = F → C → H → E**, then spawn **Lane P (T8 polish)** from the integrated `main`. Each
-PR: inline `/code-review` → fix → `git merge-tree` vs advancing `main` → resolve hotspots → squash-merge →
-`./build-app.sh debug` + launch + **visual pass** (S19 UI-drive recipe). All four built clean / 0% CPU and
-each carries a "Needs visual verify" checklist in its PR body. Then reconcile docs (tick BACKLOG T1–T8).
+**How the train ran (merge-main-into-branch, then squash):** merged F clean; for C/H/E merged the
+advancing `main` *into* the lane branch (one-shot conflict resolve, not per-commit rebase), pushed, then
+`gh pr merge --squash`. The predicted hotspots resolved as expected — **`setExpanded` auto-merged correctly**
+(F's cardSize/folder logic + C's `resolveOverlaps`), **`BoardNode` fields + `NodeView.body`** auto-merged
+(BoxGestures + pin overlay + lock cursor all coexist). **Only one real conflict:** H↔C both added a computed
+var (`hoverOutline` / `pinGlyph`) at the same spot → kept both. **One deliberate add during F+H:** the
+open-hand cursor on F's `folderHeader` (H had deferred it). Verified each step: `swift build` per merge +
+push-solver test 10/10 on integrated `main`.
 
-**⚠️ Known merge hotspots to reconcile (forked from baseline in parallel):**
-- **`Model.swift setExpanded`** — C adds the push-on-expand hook; F relaxes it to folders + `cardSize`.
-  Keep C's `resolveOverlaps` call, wrap F's folder/cardSize logic around it.
-- **`Canvas.swift NodeView.body` / drag gestures** — F splits folder drag (new `BoxGestures` modifier,
-  whole-box gestures on notes only); C adds a pinned early-out + lock cursor; H adds the hover overlay +
-  body cursor. Three-way, localized.
-- **Folder-header cursor** — H deferred the open-hand cursor on the *folder* header (lives in F's
-  `folderBox`); add it during the F+H reconcile. Also: C flagged a minor lock-cursor pop-leak (H's domain)
-  and group-drag-with-a-pinned-member (deferred).
+> ⚠️ **OWE MAX A VISUAL PASS** (whole sprint — batched, deferred from per-PR per the review workflow). The
+> highest-value things to eyeball on the integrated build (use the S19 UI-drive recipe):
+> - **T2/T6 (F):** folder header drags / interior marquees / double-click-interior makes a note; ⤢ opens the
+>   folder-note card. **Known wrinkle:** an *expanded* folder still auto-grows `effectiveFrame` to enclose its
+>   children (only *collapsed* short-circuits), so a folder with scattered children may balloon the card and
+>   overlap the (still-visible) child boxes. Confirm it's acceptable or file a follow-up.
+> - **T4 (C):** drop onto a sibling pushes it aside; pinned box is immovable + acts as obstacle; group-drag
+>   carrying a pinned member is **deferred** (early-out only covers grabbing the pin itself).
+> - **T1/T3 (H):** cursors per region; chrome hides below 0.5× zoom; lock-cursor `push/pop` could leak a stack
+>   frame if a box vanishes mid-hover (low severity, noted).
+> - **T7 (E):** drag a connector endpoint onto another box to re-route (link follows); double-click a connector
+>   to label it.
 
-**Then S20-style cleanup owed:** 4 lane worktrees + remote branches (`s5-*`) prune after merge.
+**Next up:** **T8 micro-polish** (the last Sprint-5 ticket — cosmetic consistency sweep; do it inline, no need
+to spawn a lane for one low-risk ticket), then close out Sprint 5. Or knock out the batched visual pass above
+first.
 
 ---
 
