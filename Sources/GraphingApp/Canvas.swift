@@ -721,6 +721,7 @@ struct NodeView: View {
     private var expandedCard: some View {
         VStack(spacing: 0) {
             cardHeader
+            if model.hasDiskConflict(node.id) { conflictBanner }
             Divider()
             cardBody
         }
@@ -735,7 +736,8 @@ struct NodeView: View {
         .onAppear { cardText = model.fileText(node.id); cardDraft = cardText }
         .onChange(of: model.diskRevision) { _, _ in
             // A watched file changed (our own link-write or an external edit). Re-read — but never
-            // while the user is editing this card, or we'd clobber their unsaved draft.
+            // while the user is editing this card, or we'd clobber their unsaved draft. An external
+            // change to an in-edit card instead raises model.diskConflicts → the reload banner below.
             guard !cardEditing else { return }
             let fresh = model.fileText(node.id)
             if fresh != cardText { cardText = fresh; cardDraft = fresh }
@@ -743,10 +745,31 @@ struct NodeView: View {
         .onChange(of: model.viewedCommit) { _, _ in
             // Entering/leaving time-travel: history is read-only, so drop any edit and show this
             // commit's content (the diskRevision reload above is skipped while editing).
+            if cardEditing { model.endEditingFile(node.id) }
             cardEditing = false
             cardText = model.fileText(node.id); cardDraft = cardText
         }
-        .onDisappear { if cardEditing { model.saveFileContent(node.id, cardDraft) } }
+        .onDisappear { if cardEditing { model.saveFileContent(node.id, cardDraft); model.endEditingFile(node.id) } }
+    }
+
+    /// Sober reload prompt: an external edit landed on this file while you were editing its card.
+    /// Reload discards the local draft and re-reads disk; dismiss keeps editing (next save wins).
+    private var conflictBanner: some View {
+        HStack(spacing: 8 * scale) {
+            Image(systemName: "arrow.triangle.2.circlepath").font(.system(size: 11 * scale))
+            Text("Updated on disk").font(.system(size: 12 * scale, weight: .medium)).lineLimit(1)
+            Spacer(minLength: 4 * scale)
+            Button("Reload") { reloadFromDisk() }
+                .buttonStyle(.plain).font(.system(size: 11 * scale, weight: .semibold))
+            Button { model.clearDiskConflict(node.id) } label: { Image(systemName: "xmark") }
+                .buttonStyle(.plain).font(.system(size: 10 * scale))
+                .help("Keep editing")
+        }
+        .foregroundStyle(.orange)
+        .padding(.horizontal, 10 * scale)
+        .frame(height: 26 * scale)
+        .frame(maxWidth: .infinity)
+        .background(Color.orange.opacity(0.14))
     }
 
     private var cardHeader: some View {
@@ -829,10 +852,20 @@ struct NodeView: View {
         if cardEditing {                                  // leaving edit → persist
             model.saveFileContent(node.id, cardDraft)
             cardText = cardDraft
+            model.endEditingFile(node.id)
         } else {
             cardDraft = cardText
+            model.beginEditingFile(node.id)
         }
         withAnimation(.easeInOut(duration: 0.12)) { cardEditing.toggle() }
+    }
+
+    /// The file changed on disk while this card was mid-edit; reload it, discarding the local draft.
+    private func reloadFromDisk() {
+        let fresh = model.fileText(node.id)
+        cardText = fresh; cardDraft = fresh
+        cardEditing = false
+        model.endEditingFile(node.id)   // also clears the conflict
     }
 
     private var hasCustomColor: Bool { node.colorName != nil }

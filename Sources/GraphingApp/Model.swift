@@ -363,6 +363,14 @@ final class AppModel: ObservableObject {
     /// tell our own echo from a genuine external change and not loop or re-sync needlessly.
     private var selfWrites: [String: Date] = [:]
 
+    /// Vault-relative paths of notes whose card/peek is being edited right now. The edit-guarded
+    /// re-read silently drops an external change to one of these (so the next save would clobber it),
+    /// so we track them to detect that conflict and raise the reload banner instead.
+    private var editingPaths: Set<String> = []
+    /// Notes that changed on disk *externally* while their card/peek was in edit mode — the banner
+    /// shows on each of these until the user reloads (discard local edits) or dismisses (keep editing).
+    @Published private(set) var diskConflicts: Set<String> = []
+
     // MARK: Version history (git time-travel — VIEW-ONLY)
 
     /// True when the open vault is a git repo (version history enabled). Mirrors `GitService.isRepo`.
@@ -624,6 +632,8 @@ final class AppModel: ObservableObject {
         historyGhosts = []
         historyGhostEdges = []
         historyAddedEdges = []
+        editingPaths = []
+        diskConflicts = []
         UserDefaults.standard.removeObject(forKey: defaultsKey)
     }
 
@@ -652,6 +662,35 @@ final class AppModel: ObservableObject {
         return Date().timeIntervalSince(when) < 2
     }
 
+    // MARK: Conflict reload banner (external change while editing a card/peek)
+
+    /// A card/peek entered edit mode for `id`'s note. Track it so an external change to that file
+    /// (which the edit-guard would otherwise silently swallow) raises the reload banner.
+    func beginEditingFile(_ id: UUID) {
+        guard let n = node(id), n.kind == .note else { return }
+        editingPaths.insert(n.relPath)
+    }
+
+    /// A card/peek left edit mode (saved, cancelled, collapsed, or closed). Stop watching it for a
+    /// conflict and clear any banner already raised — once you're no longer editing, there's nothing
+    /// unsaved to clobber.
+    func endEditingFile(_ id: UUID) {
+        guard let n = node(id) else { return }
+        editingPaths.remove(n.relPath)
+        diskConflicts.remove(n.relPath)
+    }
+
+    func hasDiskConflict(_ id: UUID) -> Bool {
+        guard let n = node(id) else { return false }
+        return diskConflicts.contains(n.relPath)
+    }
+
+    /// Resolve a conflict by discarding local edits: clear the flag so the caller re-reads disk.
+    func clearDiskConflict(_ id: UUID) {
+        guard let n = node(id) else { return }
+        diskConflicts.remove(n.relPath)
+    }
+
     /// React to a debounced batch of changed vault-relative paths from the watcher.
     func handleDiskChange(_ rels: [String]) {
         guard vault != nil else { return }
@@ -662,6 +701,14 @@ final class AppModel: ObservableObject {
         // clobbering an in-progress edit; re-reading after our own link-write is what makes a drawn
         // connector's `[[link]]` appear live in the source note's card.
         diskRevision &+= 1
+        // An EXTERNAL change to a file whose card/peek is mid-edit would be silently dropped by that
+        // edit-guard (and clobbered by the next save), so flag it for the reload banner — but never
+        // while time-traveling (git history is read-only, no live conflict possible).
+        if !isTimeTraveling {
+            for rel in relevant where editingPaths.contains(rel) && !isRecentSelfWrite(rel) {
+                diskConflicts.insert(rel)
+            }
+        }
         // Reconcile structure (new/deleted/moved boxes) only for EXTERNAL changes — our own
         // create/move/trash already updated the board in its transaction — and never mid-interaction,
         // so a drag/resize isn't yanked out from under the user.

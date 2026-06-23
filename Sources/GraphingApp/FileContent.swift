@@ -55,6 +55,7 @@ struct FilePeekCard: View {
     var body: some View {
         VStack(spacing: 0) {
             header
+            if model.hasDiskConflict(node.id) { conflictBanner }
             Divider()
             content
         }
@@ -63,20 +64,48 @@ struct FilePeekCard: View {
         .overlay(RoundedRectangle(cornerRadius: 14).stroke(node.accent.opacity(0.5), lineWidth: 1))
         .shadow(color: .black.opacity(0.28), radius: 20, y: 8)
         .onAppear { loaded = model.fileText(node.id); draft = loaded }
-        .onDisappear { if editing { model.saveFileContent(node.id, draft) } }
+        .onDisappear { if editing { model.saveFileContent(node.id, draft); model.endEditingFile(node.id) } }
         .onChange(of: node.id) { _, _ in
-            if editing { model.saveFileContent(node.id, draft) }
+            if editing { model.saveFileContent(node.id, draft); model.endEditingFile(node.id) }
             editing = false; loaded = model.fileText(node.id); draft = loaded
         }
         .onChange(of: model.diskRevision) { _, _ in
-            guard !editing else { return }   // don't clobber an in-progress edit
+            // Don't clobber an in-progress edit; an external change to an in-edit peek instead raises
+            // model.diskConflicts → the reload banner below.
+            guard !editing else { return }
             let fresh = model.fileText(node.id)
             if fresh != loaded { loaded = fresh; draft = fresh }
         }
         .onChange(of: model.viewedCommit) { _, _ in
+            if editing { model.endEditingFile(node.id) }
             editing = false   // history is read-only
             loaded = model.fileText(node.id); draft = loaded
         }
+    }
+
+    /// Sober reload prompt: an external edit landed on this file while you were editing the peek.
+    /// Reload discards the local draft and re-reads disk; dismiss keeps editing (next save wins).
+    private var conflictBanner: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "arrow.triangle.2.circlepath")
+            Text("Updated on disk").font(.callout).fontWeight(.medium).lineLimit(1)
+            Spacer(minLength: 6)
+            Button("Reload") { reloadFromDisk() }
+                .buttonStyle(.plain).fontWeight(.semibold)
+            Button { model.clearDiskConflict(node.id) } label: { Image(systemName: "xmark") }
+                .buttonStyle(.plain).help("Keep editing")
+        }
+        .foregroundStyle(.orange)
+        .padding(.horizontal, 14)
+        .padding(.vertical, 8)
+        .background(Color.orange.opacity(0.14))
+    }
+
+    /// External change landed while editing: re-read disk and drop the local draft.
+    private func reloadFromDisk() {
+        loaded = model.fileText(node.id); draft = loaded
+        editing = false
+        model.endEditingFile(node.id)   // also clears the conflict
     }
 
     private var header: some View {
@@ -162,8 +191,10 @@ struct FilePeekCard: View {
         if editing {                                   // leaving edit → persist
             model.saveFileContent(node.id, draft)
             loaded = draft
+            model.endEditingFile(node.id)
         } else {
             draft = loaded
+            model.beginEditingFile(node.id)
         }
         withAnimation(.easeInOut(duration: 0.15)) { editing.toggle() }
     }
