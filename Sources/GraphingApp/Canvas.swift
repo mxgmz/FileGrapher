@@ -616,6 +616,16 @@ struct EdgeLine: View {
     let selected: Bool
     var absentInHistory = false   // link not in the viewed commit → dim + dash ("added later")
 
+    @State private var hovering = false
+    @State private var dragEnd: EdgeEnd?        // which endpoint is being dragged (nil == none)
+    @State private var dragPoint: CGPoint?      // the endpoint's live screen position while dragging
+    @State private var dropTarget: UUID?        // box the dragged endpoint would re-route onto
+    @State private var editingLabel = false
+    @State private var labelDraft = ""
+    @FocusState private var labelFocused: Bool
+
+    private enum EdgeEnd { case from, to }
+
     private var linePath: Path {
         var p = Path()
         p.move(to: p1)
@@ -631,22 +641,142 @@ struct EdgeLine: View {
         gappArrowhead(tip: p2, from: edge.style == .straight ? p1 : c2)
     }
 
+    /// Approximate point on the curve at t=0.5 (cubic-Bezier midpoint), where a label reads cleanly.
+    private var midPoint: CGPoint {
+        if edge.style == .straight { return CGPoint(x: (p1.x + p2.x) / 2, y: (p1.y + p2.y) / 2) }
+        return CGPoint(x: 0.125 * p1.x + 0.375 * c1.x + 0.375 * c2.x + 0.125 * p2.x,
+                       y: 0.125 * p1.y + 0.375 * c1.y + 0.375 * c2.y + 0.125 * p2.y)
+    }
+
     var body: some View {
         ZStack {
             if selected {
                 linePath.stroke(edge.color.opacity(0.28),
                                 style: StrokeStyle(lineWidth: 9, lineCap: .round))
+            } else if hovering {
+                // Surface the (otherwise invisible) hit zone so the user sees what a click will grab.
+                linePath.stroke(edge.color.opacity(0.18),
+                                style: StrokeStyle(lineWidth: 14, lineCap: .round))
             }
             linePath.stroke(edge.color.opacity(absentInHistory ? 0.3 : 1),
                             style: StrokeStyle(lineWidth: selected ? 3 : 2, lineCap: .round,
                                                dash: absentInHistory ? [6, 4] : []))
             if edge.isDirected { arrowPath.fill(edge.color.opacity(absentInHistory ? 0.3 : 1)) }
+            label
+            if selected && !model.isTimeTraveling { endpointHandles }
+            rerouteOverlay
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         // Hit area is only the fattened line, so taps off the line fall through to the canvas.
         .contentShape(linePath.strokedPath(StrokeStyle(lineWidth: 18, lineCap: .round)))
+        .onHover { hovering = $0 }
         .onTapGesture { model.selectEdge(edge.id) }
         .contextMenu { contextMenu }
+    }
+
+    // MARK: Draggable endpoints (re-route)
+
+    @ViewBuilder
+    private var endpointHandles: some View {
+        // Nudge each handle just off the box edge (toward its control point / the other end) so it sits
+        // in open canvas — the edge layer draws *below* the boxes, so a handle over a box would be hidden.
+        endpointHandle(.from, at: nudged(p1, toward: edge.style == .straight ? p2 : c1))
+        endpointHandle(.to, at: nudged(p2, toward: edge.style == .straight ? p1 : c2))
+    }
+
+    private func nudged(_ point: CGPoint, toward other: CGPoint) -> CGPoint {
+        let dx = other.x - point.x, dy = other.y - point.y
+        let len = max(1, hypot(dx, dy))
+        let step: CGFloat = 9
+        return CGPoint(x: point.x + dx / len * step, y: point.y + dy / len * step)
+    }
+
+    private func endpointHandle(_ end: EdgeEnd, at anchor: CGPoint) -> some View {
+        Circle()
+            .fill(Color.white)
+            .overlay(Circle().stroke(edge.color.opacity(0.9), lineWidth: 2))
+            .shadow(color: .black.opacity(0.18), radius: 2, y: 1)
+            .frame(width: 12, height: 12)
+            .position(dragEnd == end ? (dragPoint ?? anchor) : anchor)
+            .gesture(rerouteDrag(end))
+            .help("Drag onto another box to re-route this connection")
+    }
+
+    private func rerouteDrag(_ end: EdgeEnd) -> some Gesture {
+        DragGesture(minimumDistance: 1, coordinateSpace: .global)
+            .onChanged { v in
+                let local = model.canvasLocal(v.location)
+                dragEnd = end
+                dragPoint = local
+                let target = model.node(atWorld: model.screenToWorld(local))
+                let fixedEnd = end == .from ? edge.to : edge.from
+                dropTarget = (target?.id != fixedEnd) ? target?.id : nil
+            }
+            .onEnded { v in
+                let target = model.node(atWorld: model.screenToWorld(model.canvasLocal(v.location)))
+                if let target {
+                    let newFrom = end == .from ? target.id : edge.from
+                    let newTo = end == .to ? target.id : edge.to
+                    withAnimation(gappSpring) { _ = model.rerouteEdge(edge.id, newFrom: newFrom, newTo: newTo) }
+                }
+                dragEnd = nil; dragPoint = nil; dropTarget = nil
+            }
+    }
+
+    /// While dragging an endpoint: a dashed lead to the cursor and a highlight on the box it'd land on.
+    @ViewBuilder
+    private var rerouteOverlay: some View {
+        if let dragEnd, let dragPoint {
+            let anchor = dragEnd == .from ? p2 : p1
+            Path { p in p.move(to: anchor); p.addLine(to: dragPoint) }
+                .stroke(edge.color.opacity(0.7),
+                        style: StrokeStyle(lineWidth: 2, lineCap: .round, dash: [6, 4]))
+                .allowsHitTesting(false)
+            if let dropTarget, let targetNode = model.node(dropTarget) {
+                let f = model.effectiveFrame(of: targetNode)
+                RoundedRectangle(cornerRadius: 12)
+                    .stroke(edge.color, lineWidth: 3)
+                    .frame(width: f.width * model.zoom, height: f.height * model.zoom)
+                    .position(model.worldToScreen(CGPoint(x: f.midX, y: f.midY)))
+                    .allowsHitTesting(false)
+            }
+        }
+    }
+
+    // MARK: Label
+
+    @ViewBuilder
+    private var label: some View {
+        if editingLabel {
+            TextField("Label", text: $labelDraft)
+                .textFieldStyle(.plain)
+                .multilineTextAlignment(.center)
+                .font(.system(size: 12, weight: .medium))
+                .frame(width: 110)
+                .padding(.horizontal, 6).padding(.vertical, 3)
+                .background(RoundedRectangle(cornerRadius: 6).fill(Color(nsColor: .controlBackgroundColor)))
+                .overlay(RoundedRectangle(cornerRadius: 6).stroke(edge.color.opacity(0.6), lineWidth: 1))
+                .focused($labelFocused)
+                .onAppear { labelDraft = edge.label ?? ""; labelFocused = true }
+                .onSubmit { commitLabel() }
+                .onExitCommand { editingLabel = false }
+                .onChange(of: labelFocused) { _, focused in if !focused { commitLabel() } }
+                .position(midPoint)
+        } else if let text = edge.label, !text.isEmpty {
+            Text(text)
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(.primary)
+                .padding(.horizontal, 6).padding(.vertical, 2)
+                .background(RoundedRectangle(cornerRadius: 6).fill(.ultraThinMaterial))
+                .overlay(RoundedRectangle(cornerRadius: 6).stroke(edge.color.opacity(0.4), lineWidth: 1))
+                .onTapGesture { model.selectEdge(edge.id); editingLabel = true }
+                .position(midPoint)
+        }
+    }
+
+    private func commitLabel() {
+        model.setEdgeLabel(edge.id, labelDraft)
+        editingLabel = false
     }
 
     @ViewBuilder
@@ -670,6 +800,12 @@ struct EdgeLine: View {
         }
         Button(edge.isDirected ? "Hide Arrowhead" : "Show Arrowhead") {
             model.setEdgeDirected(edge.id, !edge.isDirected)
+        }
+        Button(edge.label == nil ? "Add Label…" : "Edit Label…") {
+            model.selectEdge(edge.id); editingLabel = true
+        }
+        if edge.label != nil {
+            Button("Remove Label") { model.setEdgeLabel(edge.id, "") }
         }
         Divider()
         Button("Delete Connection", role: .destructive) { model.deleteEdge(edge.id) }

@@ -200,6 +200,7 @@ struct BoardEdge: Identifiable, Codable, Equatable {
     var styleRaw: String?    // EdgeStyle raw value; nil == curved
     var linkBacked: Bool?    // true == this edge IS a `[[wikilink]]` on disk (read side owns it); nil == a
                              // hand-drawn visual edge the link-reconcile must never delete
+    var label: String?       // a user-typed connector label ("depends on"); nil == unlabelled
 
     var style: EdgeStyle { EdgeStyle(rawValue: styleRaw ?? "") ?? .curved }
     var isDirected: Bool { directed ?? true }
@@ -2203,6 +2204,34 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// Re-anchor an existing connector to a new pair of boxes (dragging an endpoint onto another box).
+    /// If the old edge was a real `[[wikilink]]`, the link follows: the old directional link is removed
+    /// and the new one written via the same managed-block machinery — one undo step covers both files
+    /// and the board. No-op for a self-loop, an unchanged route, or a route that would duplicate another
+    /// edge. Link writes are no-ops for non-linkable endpoints, so such a re-route stays visual-only.
+    @discardableResult
+    func rerouteEdge(_ id: UUID, newFrom: UUID, newTo: UUID) -> Bool {
+        guard let idx = board.edges.firstIndex(where: { $0.id == id }),
+              newFrom != newTo, node(newFrom) != nil, node(newTo) != nil else { return false }
+        let old = board.edges[idx]
+        guard old.from != newFrom || old.to != newTo else { return false }
+        let duplicatesOther = board.edges.contains { other in
+            other.id != id && ((other.from == newFrom && other.to == newTo) ||
+                               (other.from == newTo && other.to == newFrom))
+        }
+        guard !duplicatesOther else { return false }
+        transaction {
+            if let a = node(old.from), let b = node(old.to) { removeLink(from: a, to: b) }
+            board.edges[idx].from = newFrom
+            board.edges[idx].to = newTo
+            if let a = node(newFrom), let b = node(newTo) {
+                writeLink(from: a, to: b)
+                board.edges[idx].linkBacked = (isLinkable(a) && isLinkable(b)) ? true : nil
+            }
+        }
+        return true
+    }
+
     private func mutateEdge(_ id: UUID, _ change: (inout BoardEdge) -> Void) {
         guard let idx = board.edges.firstIndex(where: { $0.id == id }) else { return }
         transaction { change(&board.edges[idx]) }
@@ -2211,6 +2240,13 @@ final class AppModel: ObservableObject {
     func setEdgeColor(_ id: UUID, _ color: BoxColor?) { mutateEdge(id) { $0.colorName = color?.rawValue } }
     func setEdgeStyle(_ id: UUID, _ style: EdgeStyle) { mutateEdge(id) { $0.styleRaw = style.rawValue } }
     func setEdgeDirected(_ id: UUID, _ on: Bool) { mutateEdge(id) { $0.directed = on } }
+
+    /// Set (or clear, when empty/blank) a connector's label. Trimmed; blank → nil so an empty label
+    /// never persists or renders.
+    func setEdgeLabel(_ id: UUID, _ label: String) {
+        let trimmed = label.trimmingCharacters(in: .whitespacesAndNewlines)
+        mutateEdge(id) { $0.label = trimmed.isEmpty ? nil : trimmed }
+    }
 
     // MARK: Navigation
 
