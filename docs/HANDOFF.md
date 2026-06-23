@@ -5,7 +5,59 @@ open questions. At a session's start, read the top entry to pick up where we lef
 
 ---
 
-## ▶ NEXT SESSION — START HERE · S19 shipped **read-side link auto-draw** + cleared git-time-travel UI debt
+## ▶ NEXT SESSION — START HERE · S20 shipped **4 parallel-agent PRs** (Tier-1 UX + reload banner + undo-in-rename)
+
+S20 ran an **orchestrated multi-agent** flow: 4 background worktree agents → 4 PRs → inline `/code-review`
+→ merged in order. All four are on `main` (squash-merged, integration build clean, app launches 0% CPU). The
+Sprint-4 git-time-travel work (S15–S19) was committed first (`32184fa`) so branches forked from a buildable tree.
+
+**Landed on `main` (PRs #1–#4, github.com/mxgmz/FileGrapher):**
+- **#1 ⌘Z-in-rename fix** — `FieldEditor` (App.swift) routes ⌘Z/⇧⌘Z to the focused field editor's own undo
+  while editing a title/card body, board undo otherwise. No `.disabled` gate (focus isn't SwiftUI-observable;
+  routed closure is no-op-safe). Resolves the long-standing known issue.
+- **#2 reload banner** — an external change to an in-edit card/peek raises `diskConflicts` (reuses self-write
+  suppression; off while time-traveling) → a sober "Updated on disk" banner; Reload re-reads, dismiss keeps editing.
+- **#3 zoom navigation** — ⌘+/−/0 (viewport-center anchored), Zoom to Fit (⌘9 + TopBar button), click-to-reset zoom %.
+- **#4 empty-canvas menu + duplicate** — right-click empty → New Note (at cursor)/Paste/Select All; ⌘D + ⌥-drag
+  duplicate as real "copy" files. (Double-click-empty→new-note was already implemented.)
+
+**⚠️ Owe Max a visual pass** (all four — verification deferred to review per the workflow; build + headless only).
+Each PR body has a "Needs visual verify" checklist. Highest-value to eyeball: **#1** typing-undo vs board-undo on a
+fresh board (the field-editor-undo assumption); **#4** ⌥-drag = two ⌘Z (intended) + marquee still works;
+**#2** Reload vs dismiss semantics. App is built at `dist/GraphingApp.app` (currently running).
+
+**Cleanup owed:** the 4 agent worktrees still exist under `.claude/worktrees/` and the 4 remote branches weren't
+deleted on merge (`--delete-branch=false`) — prune when convenient (`git worktree remove` + `git push origin --delete <branch>`).
+
+**Next builds (pick one):** the **loupe** (last Sprint-4 polish — render the diff under a draggable lens) · remaining
+Tier-2 UX (Finder drag-in, alignment guides, arrow-key nudge, collapse-folder) · or the secondary UI-verify debt
+(S12 connector→wikilink round-trip, marquee, copy/paste, Quick Look) now that the UI is drivable.
+
+---
+
+## 2026-06-23 — Session 20 — **orchestrated 4 parallel sub-agents → 4 reviewed PRs, merged to main**
+Max asked to tackle the remaining backlog in parallel: orchestrator + sub-agents, deliverables as PRs, reviewed
+and merged one by one, each on its own branch. How it ran (reusable recipe):
+1. **Phase 0 — baseline.** Committed + pushed the uncommitted S15–S19 Sprint-4 work (`32184fa`) so every branch
+   forked from a buildable tree (a worktree forks the last commit, **not** the dirty working tree — non-negotiable).
+2. **Phase 1 — author in parallel.** 4 background worktree agents, partitioned **by conflict-domain** (not one per
+   ticket): zoom · creation/menu · undo-bug · reload-banner. Each got CLAUDE.md + HANDOFF + BACKLOG, a tight brief
+   with a **declared file footprint**, build-clean + headless-test requirement, **don't touch docs** (orchestrator
+   reconciles → kills the worst conflict class), **don't drive the UI** (visual verify = the review step).
+3. **Phase 2 — review + merge train.** Ran `/code-review` **inline** over each diff (small diffs → reviewed directly,
+   skipped the skill's 40-agent fan-out). One real finding: #1's `.disabled` gate was stale (field focus isn't a
+   SwiftUI-observable dependency) → could swallow ⌘Z on an empty board; fixed by dropping the gate (routed closure is
+   no-op-safe). Merged **#1→#2→#3→#4** (squash), `git merge-tree`-checked each against the advancing main — **all
+   clean** (the predicted #1↔#4 App.swift clash never materialized: #4's Duplicate went in the `.newItem` group, not
+   `.undoRedo`). Integration `./build-app.sh debug` clean; app launches 0% CPU.
+
+**Lesson / reusable:** parallel agents save **authoring** time, not review/merge (that stays serial — it's where
+quality holds). Partition by shared-file region + forbid doc edits → near-zero merge conflict. Small diffs → review
+inline; don't fan out cold agents that re-derive context you already have.
+
+---
+
+## 2026-06-22 — Session 19 shipped **read-side link auto-draw** + cleared git-time-travel UI debt
 Two things landed S19 (entries below): (1) Sprint 4 P0–P3 git time-travel is **eyeball-verified end-to-end**
 and provably VIEW-ONLY; (2) the **Sprint-3 read-side gap is closed** — `[[link]]`→auto-drawn edges now works
 (unit 9/9 + live integration verified). The living-canvas link spine is now **bidirectional**.

@@ -27,7 +27,9 @@ Committed:
   cards/peeks re-read live. **Self-write suppression** (`markSelfWrite` + `isRecentSelfWrite`) and a
   mid-interaction guard keep the app's own writes from looping or yanking a drag. *(Found+fixed an
   FSEvents `UseCFTypes` crash. The link auto-draw on external `[[..]]` still needs the read side below.)*
-- ⬜ **Fix:** ⌘Z while editing a box title should undo the *text*, not the board.
+- ✅ **Fix (S20, PR #1):** ⌘Z while editing a box title undoes the *text field*, not the board —
+  first-responder-aware Undo/Redo (`FieldEditor` in App.swift) routes to the focused field editor's own
+  undo while editing, board undo otherwise.
 
 ---
 
@@ -63,8 +65,10 @@ Committed (Phase 1 — notes linking + live read, **no git required**):
   114148×98109 Folder 6); **(3) spawn new boxes near their parent**, not a fixed corner. Heal + mirror
   verified on the real board; **Fix 1 still needs an isolated end-to-end verify** (live-vault test tangled
   with concurrent in-app dragging — don't stress-test the live vault).
-- ⬜ **Conflict default = non-destructive reload banner** ("Updated on disk — Reload"); the ghost overlay
-  (safe live-overwrite) is the parallel track 3a, not Phase 1.
+- ✅ **Conflict default = non-destructive reload banner (S20, PR #2)** — an external change to a file
+  whose card/peek is mid-edit raises a per-file conflict (`diskConflicts`, reusing self-write suppression;
+  suppressed while time-traveling) and shows a sober "Updated on disk" banner: **Reload** re-reads disk,
+  dismiss keeps editing. Headless 8/8. (The ghost overlay / safe live-overwrite is still the parallel track 3a.)
 
 Later phases (tracked in the spec, not this sprint): **P2** typed/labeled links · **P3** code references
 (derived + comment-annotation) · **P4** folder-notes · **3a** ghost overlay + live block-flow + soft-lock
@@ -130,20 +134,22 @@ strength. User explicitly requested: **editable connectors**, **editable text si
 **folder color switching** (all marked ⭐ below).
 
 ### Tier 1 — "feels broken without it" (muscle memory)
-- 🔄 **Right-click context menu** — ✅ box (rename, add-note-inside, color, text size, reveal, open,
-  trash) and ✅ connector (color, style, arrowhead, delete) menus shipped (S2); ⬜ empty-canvas menu
-  (paste / select-all / new note) still todo.
+- ✅ **Right-click context menu** — ✅ box (rename, add-note-inside, color, text size, reveal, open,
+  trash) and ✅ connector (color, style, arrowhead, delete) menus (S2); ✅ empty-canvas menu
+  (New Note at cursor / Paste / Select All) *(S20, PR #4)*.
 - ✅ **Click empty canvas to deselect** — clears box + connector selection. *(S2)*
 - ✅ **Shift-click to add/remove from selection** — hand-pick boxes. *(found implemented S10, `select()` in Canvas.swift; needs Max visual verify)*
 - ✅ **Select all (⌘A)** — select every box. *(found implemented S10, `handleKey` case "a"; needs Max visual verify)*
-- ⬜ **Duplicate (⌘D / ⌥-drag)** — copy a box in place or by option-drag. *(Open Q: duplicating a
-  note should create a real second `.md` with a "copy" suffix?)*
+- ✅ **Duplicate (⌘D / ⌥-drag) (S20, PR #4)** — ⌘D nudges a copy off the original; ⌥-drag duplicates
+  then drags the copies. Reuses the disk-aware copy path → a real second `.md` with a "copy" suffix
+  *(Open Q answered: yes)*. ⌥-drag = two undo steps (move + create).
 - ✅ **Copy / cut / paste boxes (⌘C/⌘X/⌘V)** — disk-aware: copy duplicates files ("… copy"),
   cut moves them; paste files into the folder under the cursor; undoable. *(S5)*
 - ✅ **Select & delete a connector** — click a line to select (highlight), Delete removes just it. *(S2)*
 - ✅ **Resize notes** — note boxes get corner resize handles too (min 110×52). *(S3)*
-- ⬜ **Zoom to fit / frame all** — one action to fit everything on screen.
-- ⬜ **Keyboard zoom (⌘+ / ⌘- / ⌘0)** — zoom in/out and reset to 100%.
+- ✅ **Zoom to fit / frame all (S20, PR #3)** — Zoom to Fit (⌘9 + TopBar button) frames all boxes with
+  padding; empty board falls back to reset. Headless 16/16.
+- ✅ **Keyboard zoom (⌘+ / ⌘− / ⌘0) (S20, PR #3)** — viewport-center-anchored in/out (×1.2) + reset to 100%.
 
 ### Tier 2 — "I'll reach for this within a day"
 - 🔄 ⭐ **Editable connectors (Miro-style)** — ✅ drag from a box `+` handle onto an existing box to
@@ -156,13 +162,14 @@ strength. User explicitly requested: **editable connectors**, **editable text si
 - ✅ ⭐ **Editable text size** — Small / Medium / Large / Extra Large title sizes per box. *(S2; board
   default still todo)*
 - ✅ **Box color / accent (notes too)** — same Color control on note boxes, not only folders. *(S2)*
-- ⬜ **Double-click empty canvas → new note** — mirrors the "double-click inside a folder" gesture.
+- ✅ **Double-click empty canvas → new note** — mirrors the "double-click inside a folder" gesture.
+  *(found already implemented; confirmed S20, PR #4)*
 - ⬜ **Drag a file in from Finder** — drop a `.md` / folder onto the canvas to add it as a box.
 - ⬜ **Alignment guides & snapping** — snap to edges/centers with guide lines while dragging.
 - ⬜ **Arrow-key nudge** — arrows move selection a few px (Shift = larger step).
 - ⬜ **Collapse / expand a folder** — hide a folder's children on the canvas.
 - ⬜ **Open in Obsidian** — one-click `obsidian://` deep link from a note. *(also under Obsidian epic)*
-- ⬜ **Zoom % indicator** — show current zoom; click to reset.
+- ✅ **Zoom % indicator (S20, PR #3)** — TopBar shows the live zoom %; clicking it resets to 100%.
 
 ### Tier 3 — power & polish
 - ⬜ **Align & distribute selected** — align left/center, distribute evenly.
@@ -178,7 +185,7 @@ strength. User explicitly requested: **editable connectors**, **editable text si
 ## 📋 Backlog (prioritized)
 
 ### Epic: Canvas & navigation
-- ⬜ Zoom-to-fit / "frame all" action. *(see audit Tier 1)*
+- ✅ Zoom-to-fit / "frame all" action + keyboard zoom (⌘+/−/0/9) + click-to-reset zoom %. *(S20, PR #3)*
 - ⬜ Minimap / overview.
 - ⬜ Keyboard navigation: arrows nudge selection, Tab cycles boxes. *(nudge in audit Tier 2)*
 
@@ -294,6 +301,6 @@ strength. User explicitly requested: **editable connectors**, **editable text si
 ---
 
 ## 🐞 Known issues
-- ⌘Z while editing a box title runs board undo instead of text-field undo.
+- ✅ *(fixed S20, PR #1)* ⌘Z while editing a box title now undoes the text field, not the board.
 - Auto-grow folder stretches to reach a child flung far away (by design; can surprise).
 - Scroll-pan direction & input-monitor gating only verified on the dev machine.
