@@ -9,6 +9,37 @@ Scrum-style board. **Status legend:** ✅ done · 🔄 in progress · ⬜ todo �
 
 ---
 
+## 🧭 Active epics (post-Sprint-5, added 2026-06-23) — **next session builds, start at the ▶**
+
+### Epic A — Agent Cartographer (agents organize the canvas with taste)
+**Specs:** `VISION-agent-cartographer.md` + `SPEC-mcp-cartographer.md`. **MCP server BUILT & verified.**
+- ✅ **In-app MCP server, 11 `canvas_*` tools** (`MCPServer.swift`, wired in `AppModel` openVault/closeVault).
+  get/create_note/create_folder/link/move/arrange/expand/collapse/resize/color/screenshot. Loopback+token.
+- ✅ **Verified live**: headless Claude Code agent mind-mapped a Japan trip (radial, real wikilinks) and
+  tidied recordentaln8n (364→8 boxes) **without touching any project file** (hash + git proven).
+- ⬜ `renderBoardPNG` honor `colorName` (screenshots currently use fixed colors, hide the agent's coding).
+- ⬜ `syncFromDisk` vendor skip-list (`node_modules`/.build/dist) — recordentaln8n boxed 145 node_modules files.
+- 🧊 Real cartographer behaviors: gravity, minimal-motion, layout-switching (radial/columns/grid).
+
+### Epic B — Folders Are Canvases (the spatial foundation)
+**Specs:** `VISION-folder-canvas.md` + `SPEC-folder-canvas.md`. **Specced, not built.** Prereq for proper
+folder-organization + smart expansion. Phasing is risk-ordered:
+- ✅ **Phase 0 — Edge promotion (S25)** — render-only, no migration. `AppModel.promotedEdges` (pure over the
+  `collapsed` flags) re-anchors each hidden endpoint to its **outermost** collapsed ancestor, drops links
+  internal to one collapsed folder, and merges parallels into one weighted connector; `PromotedEdgeLine`
+  (Canvas.swift) draws them thicker + count-badged below the boxes. Edges among visible boxes keep their real
+  interactive `EdgeLine` untouched. **Headless 8/8** (`Tests/EdgePromotionTests.swift`); build clean; app
+  launches 0% CPU. ⬜ *Owe a visual eyeball:* collapse two folders that link across → one weighted folder↔folder
+  connector appears (`SPEC-folder-canvas.md` §4).
+- ⬜ **Phase 1 — Relative-coord migration (invisible)**. board.json v1→v2; derive absolute via one
+  `worldCenter`/`effectiveFrame` chokepoint; keep auto-grow so it's pixel-identical. Kills moveSubtree
+  prefix-shifting + the coordinate-meltdown class. (§0–3, §5.)
+- ⬜ **Phase 2 — Folder-as-card rendering**. Retire auto-grow; folder = bounded card/viewport onto its own
+  canvas; chip→card→entered by zoom.
+- ⬜ **Phase 3 — Smart expansion**. Per-folder view memory; title→preview→full spectrum; learned pre-expand.
+
+---
+
 ## 🎯 Current sprint — "Sprint 2" (started 2026-06-21)
 **Goal:** make multi-item editing and external-edit awareness feel native.
 

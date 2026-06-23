@@ -317,6 +317,8 @@ struct GhostEdge: Identifiable, Equatable {
 final class AppModel: ObservableObject {
     @Published var vault: Vault?
     @Published var board = BoardData()
+    /// In-app MCP server letting an external agent drive the canvas (docs/SPEC-mcp-cartographer.md).
+    let mcp = MCPServer()
     @Published var selection: Set<UUID> = []
     @Published var editingId: UUID?
     @Published var selectedEdge: UUID?     // the connector currently selected (if any)
@@ -690,10 +692,12 @@ final class AppModel: ObservableObject {
         didInitView = false
         startWatching()
         refreshVersionHistory()
+        mcp.start(model: self)
     }
 
     func closeVault() {
         stopWatching()
+        mcp.stop()
         vault = nil
         board = BoardData()
         selection = []
@@ -1335,6 +1339,79 @@ final class AppModel: ObservableObject {
     func effectiveFrame(of node: BoardNode) -> CGRect {
         var visited = Set<String>()
         return effectiveFrame(of: node, visited: &visited, depth: 0)
+    }
+
+    /// Render the board (or one folder's contents) to a PNG for the agent's vision-feedback loop
+    /// (docs/SPEC-mcp-cartographer.md phase 5). Schematic — boxes as rounded rects + titles, edges as lines —
+    /// which is all an agent needs to judge *layout* (overlap, balance, clustering), not the live chrome.
+    /// ponytail: in-process schematic render, no screen-recording permission. Upgrade to real-window capture
+    /// only if the agent must see actual card content/styling.
+    @MainActor func renderBoardPNG(scope: String?, maxPixels: CGFloat = 1200) -> Data? {
+        let inScope: (BoardNode) -> Bool = { node in
+            guard let scope, !scope.isEmpty else { return true }
+            return node.parentRel == scope || node.relPath == scope || node.relPath.hasPrefix(scope + "/")
+        }
+        // Respect collapsed folders: their children are hidden on the canvas, so don't draw them (or
+        // their edges) — else the picture shows a density the user can't actually see at normal zoom.
+        let collapsedPrefixes = board.nodes.filter { $0.isCollapsedFolder }.map { $0.relPath + "/" }
+        func hidden(_ node: BoardNode) -> Bool { collapsedPrefixes.contains { node.relPath.hasPrefix($0) } }
+        let nodes = board.nodes.filter { inScope($0) && !hidden($0) }
+        guard let first = nodes.first else { return nil }
+
+        var bounds = effectiveFrame(of: first)
+        for node in nodes.dropFirst() { bounds = bounds.union(effectiveFrame(of: node)) }
+        bounds = bounds.insetBy(dx: -60, dy: -60)
+        let scale = min(maxPixels / max(bounds.width, bounds.height), 1)
+        let pxW = max(bounds.width * scale, 1), pxH = max(bounds.height * scale, 1)
+
+        // World is y-down (box centers); AppKit image space is y-up — flip vertically.
+        func img(_ p: CGPoint) -> CGPoint { CGPoint(x: (p.x - bounds.minX) * scale, y: pxH - (p.y - bounds.minY) * scale) }
+        func imgRect(_ r: CGRect) -> CGRect {
+            CGRect(x: (r.minX - bounds.minX) * scale, y: pxH - (r.maxY - bounds.minY) * scale,
+                   width: r.width * scale, height: r.height * scale)
+        }
+
+        let image = NSImage(size: CGSize(width: pxW, height: pxH))
+        image.lockFocus()
+        NSColor(white: 0.97, alpha: 1).setFill()
+        NSBezierPath(rect: CGRect(x: 0, y: 0, width: pxW, height: pxH)).fill()
+
+        func drawNode(_ node: BoardNode) {
+            let rect = imgRect(effectiveFrame(of: node))
+            let isFolder = node.kind == .folder
+            (isFolder ? NSColor(calibratedRed: 0.90, green: 0.93, blue: 0.99, alpha: 1) : .white).setFill()
+            (node.isExpanded ? NSColor.systemBlue : NSColor(white: 0.55, alpha: 1)).setStroke()
+            let box = NSBezierPath(roundedRect: rect, xRadius: 8, yRadius: 8)
+            box.fill(); box.lineWidth = node.isExpanded ? 2.5 : 1.5; box.stroke()
+
+            let fontSize = max(8, min(rect.height * 0.28, 18))
+            let attrs: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: fontSize), .foregroundColor: NSColor.black]
+            let title = node.name as NSString
+            let size = title.size(withAttributes: attrs)
+            // Folder title hugs the top (it's a header); a note's title centers in the box.
+            let ty = isFolder ? rect.maxY - size.height - 4 : rect.midY - size.height / 2
+            title.draw(at: CGPoint(x: rect.midX - size.width / 2, y: ty), withAttributes: attrs)
+        }
+
+        // Z-order mirrors the canvas: folders (containers) at the back, then connectors, then notes on top —
+        // otherwise a folder's fill paints over the edges inside it.
+        for node in nodes where node.kind == .folder { drawNode(node) }
+
+        let byId = Dictionary(board.nodes.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+        NSColor(white: 0.5, alpha: 1).setStroke()
+        for edge in board.edges {
+            guard let a = byId[edge.from], let b = byId[edge.to],
+                  (inScope(a) || inScope(b)), !hidden(a), !hidden(b) else { continue }
+            let line = NSBezierPath()
+            line.move(to: img(a.center)); line.line(to: img(b.center))
+            line.lineWidth = 1.5; line.stroke()
+        }
+
+        for node in nodes where node.kind == .note { drawNode(node) }
+
+        image.unlockFocus()
+        guard let tiff = image.tiffRepresentation, let rep = NSBitmapImageRep(data: tiff) else { return nil }
+        return rep.representation(using: .png, properties: [:])
     }
 
     /// Max nesting we'll ever walk before assuming the graph is pathological.
@@ -2113,6 +2190,15 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// Resize a box's stored frame (board.json only — never touches disk). A folder still can't render
+    /// smaller than its contents (effectiveFrame clamps it), but its stored frame updates. Undoable.
+    func setSize(_ id: UUID, _ size: CGSize) {
+        guard let idx = board.nodes.firstIndex(where: { $0.id == id }) else { return }
+        let w = max(60, min(size.width, AppModel.worldBound))
+        let h = max(40, min(size.height, AppModel.worldBound))
+        transaction { board.nodes[idx].width = w; board.nodes[idx].height = h }
+    }
+
     /// Pin or unpin one or more boxes. A pinned box can't be dragged and the push solver never moves
     /// it (it's an obstacle others route around). Undoable. `pinned` is stored as nil when false so old
     /// board.json round-trips byte-compatibly.
@@ -2174,6 +2260,35 @@ final class AppModel: ObservableObject {
     }
 
     func clearEdgeSelection() { selectedEdge = nil }
+
+    /// Place `spokeIds` evenly on a circle around the hub and expand the hub — the cartographer's radial
+    /// layout (docs/SPEC-mcp-cartographer.md §3). The agent says "hub H, spokes [A,B,C]"; the app owns the
+    /// pixels. v1 sizes the ring so it never self-overlaps, then the existing push-on-drop solver clears any
+    /// residual collision with boxes already on the board.
+    /// ponytail: circle + push solver — no force-directed / crossing-minimization. Upgrade only if a
+    /// radial-of-radial (sub-hubs) visibly tangles.
+    func arrangeRadial(hub hubId: UUID, spokes spokeIds: [UUID]) {
+        guard node(hubId) != nil, !spokeIds.isEmpty else { return }
+        transaction {
+            setExpanded(hubId, true)
+            guard let hub = node(hubId) else { return }   // re-read: expanding can resize the card
+            let center = hub.center
+            let hubFrame = effectiveFrame(of: hub)
+            let hubReach = max(hubFrame.width, hubFrame.height) / 2
+            let spokeReach = spokeIds.compactMap { node($0) }.map { max($0.width, $0.height) / 2 }.max() ?? 0
+            let gap: CGFloat = 80
+            // Radius clears hub+spoke, and is wide enough that N spokes don't crowd the ring.
+            let clearance = hubReach + spokeReach + gap
+            let crowding = CGFloat(spokeIds.count) * (spokeReach * 2 + gap) / (2 * .pi)
+            let radius = max(clearance, crowding)
+            for (i, id) in spokeIds.enumerated() {
+                let angle = Double(i) / Double(spokeIds.count) * 2 * .pi - .pi / 2   // first spoke at 12 o'clock
+                moveSubtree(id, to: CGPoint(x: center.x + radius * CGFloat(cos(angle)),
+                                            y: center.y + radius * CGFloat(sin(angle))))
+            }
+            resolveOverlaps(movedId: hubId)
+        }
+    }
 
     /// Create a connector between two boxes (no duplicates, no self-loops). Undoable.
     @discardableResult

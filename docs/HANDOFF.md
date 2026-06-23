@@ -5,7 +5,151 @@ open questions. At a session's start, read the top entry to pick up where we lef
 
 ---
 
-## ▶ NEXT SESSION — START HERE · S22 ran the **merge train: all 4 Sprint-5 PRs merged to `main`** (T1–T7 done)
+## ▶ NEXT SESSION — START HERE · S26 — **Edge promotion shipped. Pick a track below.**
+
+S25 built **Folder-Canvas Phase 0 — edge promotion** (the lowest-risk, highest-value first build).
+Render-only, no coordinate migration. **Owe one visual eyeball** (see below). Then pick a track.
+
+**What shipped this session (S25):**
+- `AppModel.promotedEdges` (`Model.swift`, pure over the `collapsed` flags) + `PromotedEdge` struct.
+  Re-anchors each hidden endpoint to its **outermost** collapsed ancestor folder, drops links internal to one
+  collapsed folder, merges parallels into **one weighted connector** (direction preserved). Real edges among
+  visible boxes are untouched — they keep their interactive `EdgeLine`.
+- `PromotedEdgeLine` (`Canvas.swift`) — render-only, never hit-tested; drawn in `promotedEdgeLayer` below the
+  boxes (between `interactiveEdges` and `world`). Thicker line + a count badge for weight > 1.
+- **Headless 8/8** (`Tests/EdgePromotionTests.swift`, run `swift Tests/EdgePromotionTests.swift`): promotion to
+  outermost-not-deeper ancestor, internal-drop, parallel-aggregation→weight, direction, visible-edges-untouched,
+  no-collapse→empty. Build clean; app launches 0.0% CPU.
+
+> ⚠️ **OWE MAX A VISUAL EYEBALL** (render-only, logic proven headlessly): collapse two folders that link across
+> each other → expect **one weighted folder↔folder connector** (count badge if >1 link); links wholly inside one
+> collapsed folder vanish; a note→collapsed-folder link becomes a note→folder connector. recordentaln8n (current
+> vault) has the structure to show this — collapse its top-level folders. Use the S19 UI-drive recipe.
+
+**Then pick a track:**
+- **Folder-canvas Phase 1** (the big one): relative-coord migration, *invisible/behavior-preserving* first
+  (board.json v1→v2, derive absolute via one `worldCenter`/`effectiveFrame` chokepoint — see `SPEC-folder-canvas.md` §0–3). Kills the coordinate-meltdown class.
+- **Cartographer next**: `renderBoardPNG` honor `colorName` (screenshots show the agent's colors); add a
+  `node_modules`/vendor skip-list to `syncFromDisk` (recordentaln8n boxed 145 node_modules files).
+
+**State / gotchas to carry forward:**
+- ⚠️ **macOS `open dist/GraphingApp.app` launches the app WINDOWLESS** after rapid kill/relaunch cycles (vault
+  never opens, no mcp.json). **Launch the binary directly, detached:** `nohup "…/dist/GraphingApp.app/Contents/MacOS/GraphingApp" >/dev/null 2>&1 & disown`.
+- App is **currently running on the `recordentaln8n` vault** (the organized 8-box board); `vaultPath` default
+  now points there (was `Graph test`). recordentaln8n has an untracked **`.graphingapp/` sidecar** — offered
+  to add it to that repo's `.gitignore`, not yet done.
+- One bundle link took **22 min** under load (not a hang) — build in background.
+- MCP wiring recipe (to drive the app with a headless agent) is in `SPEC-mcp-cartographer.md` §6.
+
+---
+
+## S24 — **Cartographer tested on a REAL project (recordentaln8n), visual-only + verified untouched**
+
+**State: 11 MCP tools, builds clean.** Ran the cartographer on Max's real `recordentaln8n` repo (~364 boxes
+once opened as a vault) with a hard constraint: **organize the VIEW only, never touch the project**.
+
+**New tools/changes this session:**
+- `canvas_resize` (→ new `AppModel.setSize`, board.json-only) and `canvas_color` (→ existing `setColor`;
+  palette blue/purple/pink/red/orange/yellow/green/teal/graphite).
+- `canvas_collapse`/`canvas_expand` now fold/unfold **folders** (toggleCollapse) for real navigability, not
+  just note cards.
+- `renderBoardPNG` now **respects collapsed folders** (skips hidden children + their edges) — the screenshot
+  matches the actual zoomed-out view. Also fixed earlier z-order (folders→edges→notes).
+
+**The run (visual-only, enforced):** blocked the 4 file-touching tools at the agent layer
+(`--disallowedTools` for create_note/create_folder/link/move) so it could ONLY reposition/collapse/resize/
+color/expand. Agent collapsed all 5 top-level folders, color-coded them, made README the resized+expanded
+hub, and `canvas_arrange`d everything radially → **364 boxes → 8 visible**. It used `canvas_screenshot` to
+self-critique mid-task.
+
+**INTEGRITY PROVEN:** hashed all 221 project files before/after → **identical**; git working tree
+**unchanged**. Only `.graphingapp/` sidecar written (untracked — should be gitignored in that repo).
+
+**Gotchas hit (important):**
+- The grapher boxes **code files too** (`boxableExts` ∪ gappCodeExts) and does **not** skip `node_modules`
+  → opening recordentaln8n made 364 boxes, ~145 of them node_modules junk. Max chose to proceed as-is.
+  **Open follow-up: add a vendor-dir skip-list (node_modules/.build/dist…) to `syncFromDisk`.**
+- macOS `open dist/GraphingApp.app` launches the app **windowless** after rapid kill/relaunch cycles (so the
+  vault never opens / no mcp.json). **Workaround: launch the binary directly, detached** (`nohup …app/Contents/MacOS/GraphingApp >/dev/null 2>&1 & disown`).
+- One bundle link took **22 min** (system contention) — not a hang; builds in background.
+
+**Known render limitations (minor):** `renderBoardPNG` uses *fixed* folder/note colors, so it does NOT show
+the agent's `canvas_color` coding (the colors ARE in board.json / the live app). Layout is roughly (not
+perfectly) radial.
+
+**Next up:** (a) vendor-dir skip-list in syncFromDisk; (b) make `renderBoardPNG` honor `colorName` so
+screenshots show the color-coding; (c) the real cartographer behaviors (gravity, minimal-motion,
+layout-switching). *Sprint-5 T8 micro-polish still open below — independent.*
+
+---
+
+## S23 — **Agent Cartographer: vision + MCP skeleton landed**
+
+**State: builds clean, verified live end-to-end.** Brainstormed a new workstream — *agents that create &
+organize folders/notes with taste* — and shipped the first walking skeleton of its first surface.
+
+**Docs written (the dream + the how):**
+- `docs/VISION-agent-cartographer.md` — north star. Locked: scope = both scaffold + tidy (one gesture);
+  conversational; **radial** default (switch per content); hub = agent decides case-by-case; blast radius =
+  whole canvas. Load-bearing idea: **the agent never pushes pixels** — it speaks an *intent vocabulary*
+  (hub/spoke/cluster/link/expand/place-near/pin) and the app's geometry resolves it. Laws: undo-is-the-preview,
+  minimal-motion, gravity, visible-confidence, vision-feedback loop.
+- `docs/SPEC-mcp-cartographer.md` — the "how". **MCP server lives *inside* the running app** (not a
+  disk-writer) so edits flow through `transaction{}` → undo + geometry + live animation come free.
+
+**Code landed:** `Sources/GraphingApp/MCPServer.swift` (new) + wired into `AppModel` (`let mcp`, started in
+`openVault`, stopped in `closeVault`). Minimal MCP-over-HTTP on `127.0.0.1` (hand-rolled JSON-RPC, **zero
+new deps**, no SSE). Writes `<vault>/.graphingapp/mcp.json` (`{port, token}`) on launch; bearer-token +
+loopback auth. **8 tools**, all thin wrappers over existing `AppModel` methods:
+- `canvas.get` (read board) · `canvas.createNote` / `canvas.createFolder` (→ `addNote`/`addFolder`+`rename`,
+  `beginEditing:false`) · `canvas.link` (→ `connect`, writes the real `[[wikilink]]`) · `canvas.move`
+  (→ `move`, refiles on disk) · `canvas.expand` / `canvas.collapse` (→ `setExpanded`) ·
+- `canvas.arrange` → **new `AppModel.arrangeRadial(hub:spokes:)`** — the only genuinely new logic: circle
+  placement (ring sized so it never self-overlaps) + reuse `resolveOverlaps`. Spokes evenly spaced, first at
+  12 o'clock; hub expanded. ponytail-capped (no force-directed).
+
+**Verified live (Graph test vault), twice:** (1) skeleton — `initialize`/`tools/list`/`canvas.get`/
+`createNote` (board 113→114, real `.md`, scatter pos), bad token → 401, external `rm` synced box out.
+(2) full surface — created a folder + hub + 5 spokes, linked, **`arrange` → perfect pentagon (d=352, 72°
+apart, hub expanded)**; `Hub.md` got the `<!-- canvas-links -->` block with all 5 `[[wikilinks]]`; `move`
+physically refiled `Beta.md` into `Sub/`; self-link → clean JSON-RPC error. All test artifacts cleaned, app
+quit. SPEC phases 1–3 ticked ✅.
+
+**Phase 4 DONE — live conversational scaffold proven.** Renamed all 8 tools to snake_case (`canvas_get`, …)
+— the Anthropic tool-name charset (`^[a-zA-Z0-9_-]{1,64}$`) forbids the dots, so `mcp__graphing-canvas__canvas.get`
+would have been rejected. Then wired a **headless Claude Code agent** to the live server and gave it one
+natural-language task ("mind-map a two-week Japan trip"). The agent — deciding structure itself — made a
+`Japan Trip/` folder + hub note + **6 self-chosen branches** (Itinerary, Accommodation, Food, Transport,
+Budget, Culture), linked all 6 (real `[[wikilinks]]` in `Japan Trip.md`), and `canvas_arrange`d a clean
+hexagon (d=352, 60° apart, hub expanded). Independently verified via `canvas_get` + disk, then cleaned up.
+
+> **Wiring recipe (reusable):** app writes `<vault>/.graphingapp/mcp.json` (`{port, token}`) on open → build
+> an MCP config JSON pointing at `http://127.0.0.1:<port>/mcp` with `Authorization: Bearer <token>` → run
+> `claude -p "<task>" --mcp-config cfg.json --strict-mcp-config --dangerously-skip-permissions`. Tools surface
+> as `mcp__graphing-canvas__canvas_*`. (Recorded in SPEC §6 status block.)
+
+**Phase 5 DONE — vision-feedback loop closed. All 9 MCP tools built + verified live.** Added
+`canvas_screenshot` → `AppModel.renderBoardPNG(scope:maxPixels:)`: a schematic in-process AppKit render
+(rounded-rect boxes + titles + connector lines), returned as MCP image content (base64 PNG). **No
+screen-recording permission** — it draws the board model, not the on-screen window, which is all an agent
+needs to judge layout. Z-order matches the canvas (folders → edges → notes); fixed a first-cut bug where the
+folder fill painted over the edges. Verified by capturing the live Japan-Trip hexagon: valid PNG, hub + 6
+spokes + 6 connectors all visible. The render also exposed a real layout flaw (the folder frame extends far
+below its content — placeholder-position artifact), which is precisely the signal the loop is meant to give.
+
+> **App is currently OPEN** with the Japan Trip mind-map live (regenerated — the original was cleaned up in
+> the prior demo; this one is left in place on purpose for Max to verify). It's at world ~(720,2640) — ⌘9
+> (Zoom to Fit) or the sidebar "Japan Trip" jumps to it. `Graph test/Japan Trip/` has the 7 real `.md` files.
+
+**Next up:** start layering the *actual cartographer behaviors* from `VISION-agent-cartographer.md` now that
+the whole tool pipe + feedback loop exists — **gravity** (new notes land near kin), **minimal-motion**
+(earn each rearrange), and **layout-switching** (radial vs columns vs grid per topology). Also still parked:
+SPEC §7 open Qs (undo granularity, port stability, big-vault `canvas_get` payload). *Sprint-5 T8 micro-polish
+still open below — independent of this.*
+
+---
+
+## S22 ran the **merge train: all 4 Sprint-5 PRs merged to `main`** (T1–T7 done)
 
 **State: Sprint 5 T1–T7 are integrated on `main` (F→C→H→E, squash-merged #8 #7 #5 #6), build clean, app
 launches 0.8% CPU.** Worktrees pruned, `s5-*` branches deleted (local + remote). **Only T8 (micro-polish,
