@@ -146,7 +146,9 @@ struct CanvasView: View {
         let br = model.screenToWorld(CGPoint(x: r.maxX, y: r.maxY))
         let world = CGRect(x: tl.x, y: tl.y, width: br.x - tl.x, height: br.y - tl.y)
         var hit = marqueeBase
-        for n in model.board.nodes where model.effectiveFrame(of: n).intersects(world) {
+        let hidden = model.hiddenNodeIds
+        for n in model.board.nodes
+            where !hidden.contains(n.id) && model.effectiveFrame(of: n).intersects(world) {
             hit.insert(n.id)
         }
         model.selection = hit
@@ -356,9 +358,10 @@ struct CanvasView: View {
 
     /// One hit-testable, selectable view per connector (taps select, right-click restyles/deletes).
     private var interactiveEdges: some View {
-        ZStack {
+        let hidden = model.hiddenNodeIds
+        return ZStack {
             ForEach(model.board.edges) { edge in
-                if let g = edgeGeometry(edge) {
+                if !hidden.contains(edge.from), !hidden.contains(edge.to), let g = edgeGeometry(edge) {
                     EdgeLine(edge: edge, p1: g.0, c1: g.1, c2: g.2, p2: g.3,
                              selected: model.selectedEdge == edge.id,
                              absentInHistory: model.isEdgeAbsentInHistory(edge.id))
@@ -378,9 +381,11 @@ struct CanvasView: View {
     }
 
     private var world: some View {
-        ZStack(alignment: .topLeading) {
-            ForEach(sortedFolders) { node in placed(node) }
-            ForEach(notes) { node in placed(node) }
+        // Boxes inside a collapsed folder are hidden from the canvas (they stay in board.json).
+        let hidden = model.hiddenNodeIds
+        return ZStack(alignment: .topLeading) {
+            ForEach(sortedFolders.filter { !hidden.contains($0.id) }) { node in placed(node) }
+            ForEach(notes.filter { !hidden.contains($0.id) }) { node in placed(node) }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
@@ -673,6 +678,9 @@ struct NodeView: View {
     @State private var cardText = ""        // expanded-card content (loaded lazily)
     @State private var cardDraft = ""       // expanded-card editor buffer
     @State private var cardEditing = false
+    // Folder-interior marquee (rubber-band the folder's children), in the box's local screen coords.
+    @State private var interiorMarquee: CGRect?
+    @State private var interiorMarqueeBase: Set<UUID> = []
 
     private let headerHeight: CGFloat = 40
     /// Render scale = current zoom. Every fixed dimension below is multiplied by this so the box is
@@ -683,9 +691,12 @@ struct NodeView: View {
     /// While time-traveling, this box's file didn't exist yet at the viewed commit (added-later).
     private var isHistoryGhost: Bool { model.isAbsentInHistory(node.id) }
 
+    /// A folder is a *frame*, not a card: its header and interior carry their own gestures
+    /// (see `folderBox`), so the whole-box move/tap gestures attach to notes only. An expanded box
+    /// (note card or folder-note card) masks them to subviews so the header drags and the body edits.
+    private var ownsBoxGestures: Bool { node.kind == .note }
+
     var body: some View {
-        // When expanded, the box's own drag/tap are masked to subviews so the card body can
-        // scroll/select/edit and only the header drags the box.
         let mask: GestureMask = node.isExpanded ? .subviews : .all
         content
             .frame(width: displayFrame.width * scale, height: displayFrame.height * scale)
@@ -699,15 +710,10 @@ struct NodeView: View {
             }
             .overlay(alignment: .topTrailing) { if node.kind == .note && !node.isExpanded { expandChevron } }
             .contentShape(Rectangle())
-            .gesture(dragGesture, including: mask)
-            .gesture(
-                SpatialTapGesture(count: 2, coordinateSpace: .local)
-                    .onEnded { v in handleDoubleTap(at: v.location) }
-                    .exclusively(before:
-                        SpatialTapGesture(count: 1).onEnded { _ in select() }
-                    ),
-                including: mask
-            )
+            .modifier(BoxGestures(owns: ownsBoxGestures, mask: mask,
+                                  drag: dragGesture,
+                                  onDoubleTap: { handleDoubleTap(at: $0) },
+                                  onTap: { select() }))
             .contextMenu { menu }
             .overlay(alignment: .topLeading) { if node.isPinned { pinGlyph } }
             .onHover { inside in
@@ -749,8 +755,8 @@ struct NodeView: View {
 
     @ViewBuilder
     private var content: some View {
-        if node.kind == .folder { folderBox }
-        else if node.isExpanded { expandedCard }
+        if node.isExpanded { expandedCard }   // note card, or a folder's folder-note card
+        else if node.kind == .folder { folderBox }
         else { noteBox }
     }
 
@@ -810,16 +816,21 @@ struct NodeView: View {
         .background(Color.orange.opacity(0.14))
     }
 
+    /// The card's content file type. A folder's card edits its folder-note (always markdown); a note's
+    /// card uses its own file type.
+    private var cardFileType: FileType { node.kind == .folder ? .markdown : node.fileType }
+
     private var cardHeader: some View {
         HStack(spacing: 6 * scale) {
-            Image(systemName: noteIconName).foregroundStyle(node.accent).font(.system(size: 13 * scale))
+            Image(systemName: node.kind == .folder ? "folder.fill" : noteIconName)
+                .foregroundStyle(node.accent).font(.system(size: 13 * scale))
             title.font(.system(size: 13 * scale, weight: .semibold)).lineLimit(1)
             Spacer(minLength: 4 * scale)
             if model.isTimeTraveling {
                 Image(systemName: "clock.arrow.circlepath")
                     .font(.system(size: 11 * scale)).foregroundStyle(.orange)
                     .help("Viewing history — read-only")
-            } else if node.fileType == .markdown {
+            } else if cardFileType == .markdown {
                 Button { toggleCardEdit() } label: {
                     Image(systemName: cardEditing ? "eye" : "square.and.pencil").font(.system(size: 11 * scale))
                 }
@@ -836,7 +847,10 @@ struct NodeView: View {
         .background(node.accent.opacity(0.12))
         .contentShape(Rectangle())
         .gesture(dragGesture)              // header is the drag handle
-        .onTapGesture { select() }
+        .gesture(
+            SpatialTapGesture(count: 2).onEnded { _ in model.editingId = node.id }   // dbl-click header = rename
+                .exclusively(before: SpatialTapGesture(count: 1).onEnded { _ in select() })
+        )
     }
 
     @ViewBuilder
@@ -849,17 +863,25 @@ struct NodeView: View {
                 }
                 .foregroundStyle(.secondary)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else if cardEditing && node.fileType == .markdown {
+            } else if cardEditing && cardFileType == .markdown {
                 TextEditor(text: $cardDraft)
                     .font(.system(size: 13 * scale, design: .monospaced))
                     .padding(8 * scale)
             } else {
-                switch node.fileType {
+                switch cardFileType {
                 case .markdown:
                     ScrollView {
-                        MarkdownView(text: cardText, scale: scale)
-                            .padding(12 * scale)
-                            .frame(maxWidth: .infinity, alignment: .leading)
+                        if cardText.isEmpty {
+                            Text(node.kind == .folder ? "Empty folder note — click Edit to write one." : "Empty note")
+                                .font(.system(size: 12 * scale))
+                                .foregroundStyle(.secondary)
+                                .padding(12 * scale)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        } else {
+                            MarkdownView(text: cardText, scale: scale)
+                                .padding(12 * scale)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
                     }
                 case .csv:
                     CSVTableView(text: cardText, scale: scale)
@@ -943,27 +965,11 @@ struct NodeView: View {
         return hasCustomColor ? node.accent.opacity(0.55) : Color.black.opacity(0.08)
     }
 
-    // Folder box (container)
+    // Folder box (a frame/container): header = move/rename, interior = marquee its children / new note.
     private var folderBox: some View {
         VStack(alignment: .leading, spacing: 0) {
-            HStack(spacing: 6 * scale) {
-                Image(systemName: "folder.fill")
-                    .foregroundStyle(node.accent)
-                    .font(.system(size: 15 * scale))
-                title.font(.system(size: 14 * node.fontScaleValue * scale, weight: .semibold))
-                Spacer(minLength: 4 * scale)
-                Button {
-                    withAnimation(gappSpring) { _ = model.addChildNote(inFolder: node) }
-                } label: {
-                    Image(systemName: "plus").font(.system(size: 11 * scale, weight: .bold))
-                }
-                .buttonStyle(.borderless)
-                .help("Add note in this folder")
-            }
-            .padding(.horizontal, 12 * scale)
-            .frame(height: headerHeight * scale)
-            .background(node.accent.opacity(0.14))
-            Spacer(minLength: 0)
+            folderHeader
+            if !node.isCollapsedFolder { folderInterior }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(RoundedRectangle(cornerRadius: 14 * scale).fill(node.accent.opacity(0.045)))
@@ -974,6 +980,128 @@ struct NodeView: View {
                         style: StrokeStyle(lineWidth: (isSelected ? 2.5 : 1.5) * scale,
                                            dash: isSelected ? [] : [6 * scale, 4 * scale]))
         )
+    }
+
+    /// Header bar — the folder's identity and drag handle: ▸ collapse, icon, title, "+"; drag moves
+    /// the folder (carrying its contents), click selects, double-click renames.
+    private var folderHeader: some View {
+        HStack(spacing: 6 * scale) {
+            Button { withAnimation(gappSpring) { model.toggleCollapse(node.id) } } label: {
+                Image(systemName: node.isCollapsedFolder ? "chevron.right" : "chevron.down")
+                    .font(.system(size: 10 * scale, weight: .bold))
+                    .foregroundStyle(node.accent)
+            }
+            .buttonStyle(.plain)
+            .help(node.isCollapsedFolder ? "Expand folder" : "Collapse folder")
+            Image(systemName: "folder.fill")
+                .foregroundStyle(node.accent)
+                .font(.system(size: 15 * scale))
+            title.font(.system(size: 14 * node.fontScaleValue * scale, weight: .semibold))
+            if node.isCollapsedFolder {
+                Text("\(model.descendantCount(of: node)) items")
+                    .font(.system(size: 11 * scale))
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 7 * scale).padding(.vertical, 2 * scale)
+                    .background(Capsule().fill(node.accent.opacity(0.14)))
+            }
+            Spacer(minLength: 4 * scale)
+            // ⤢ opens the folder-note card — a distinct axis from the ▸ collapse control on the left.
+            Button { withAnimation(gappSpring) { model.toggleExpand(node.id) } } label: {
+                Image(systemName: "arrow.up.left.and.arrow.down.right").font(.system(size: 10 * scale, weight: .bold))
+            }
+            .buttonStyle(.borderless)
+            .help("Open folder note")
+            Button {
+                withAnimation(gappSpring) { _ = model.addChildNote(inFolder: node) }
+            } label: {
+                Image(systemName: "plus").font(.system(size: 11 * scale, weight: .bold))
+            }
+            .buttonStyle(.borderless)
+            .help("Add note in this folder")
+        }
+        .padding(.horizontal, 12 * scale)
+        .frame(height: headerHeight * scale)
+        .frame(maxWidth: .infinity)
+        .background(node.accent.opacity(0.14))
+        .contentShape(Rectangle())
+        .gesture(dragGesture)              // header is the folder's drag handle (moves it + contents)
+        .gesture(
+            SpatialTapGesture(count: 2).onEnded { _ in model.editingId = node.id }
+                .exclusively(before: SpatialTapGesture(count: 1).onEnded { _ in select() })
+        )
+    }
+
+    /// Interior — the children's region and a drop zone. Drag rubber-bands the folder's children;
+    /// click selects the folder; double-click makes a note here; an empty folder shows a faint hint.
+    private var folderInterior: some View {
+        ZStack {
+            Color.clear
+            if model.directChildren(of: node.relPath).isEmpty {
+                Text("Double-click or drag notes here")
+                    .font(.system(size: 12 * scale))
+                    .foregroundStyle(.secondary.opacity(0.6))
+                    .multilineTextAlignment(.center)
+                    .padding(12 * scale)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .contentShape(Rectangle())
+        .overlay {
+            if let r = interiorMarquee {
+                Rectangle()
+                    .fill(Color.accentColor.opacity(0.12))
+                    .overlay(Rectangle().stroke(Color.accentColor.opacity(0.7), lineWidth: 1))
+                    .frame(width: r.width, height: r.height)
+                    .position(x: r.midX, y: r.midY)
+                    .allowsHitTesting(false)
+            }
+        }
+        .gesture(interiorMarqueeGesture)
+        .gesture(
+            SpatialTapGesture(count: 2, coordinateSpace: .local).onEnded { v in handleDoubleTap(at: interiorPoint(v.location)) }
+                .exclusively(before: SpatialTapGesture(count: 1).onEnded { _ in select() })
+        )
+    }
+
+    /// Drag inside a folder's interior = marquee its children (same rule as the canvas-background
+    /// marquee: a child is selected when its `effectiveFrame` intersects the dragged rect).
+    private var interiorMarqueeGesture: some Gesture {
+        // `v.location` is in the interior's own local space (origin at the interior's top-left, i.e.
+        // below the header). The rect stays in that space for the overlay; the header offset is added
+        // only when converting to world for child hit-testing.
+        DragGesture(minimumDistance: 4, coordinateSpace: .local)
+            .onChanged { v in
+                if interiorMarquee == nil {
+                    interiorMarqueeBase = NSEvent.modifierFlags.contains(.shift) ? model.selection : []
+                    model.editingId = nil
+                    model.selectedEdge = nil
+                }
+                let start = v.startLocation, now = v.location
+                interiorMarquee = CGRect(x: min(start.x, now.x), y: min(start.y, now.y),
+                                         width: abs(now.x - start.x), height: abs(now.y - start.y))
+                applyInteriorMarquee()
+            }
+            .onEnded { _ in interiorMarquee = nil; interiorMarqueeBase = [] }
+    }
+
+    /// A point in the interior's local space → the box's local space (the interior sits below the header).
+    private func interiorPoint(_ p: CGPoint) -> CGPoint {
+        CGPoint(x: p.x, y: p.y + headerHeight * scale)
+    }
+
+    private func applyInteriorMarquee() {
+        guard let r = interiorMarquee else { return }
+        // Interior-local screen rect → world rect (the interior starts headerHeight below the box top),
+        // then select the folder's children it intersects.
+        let topLeft = CGPoint(x: displayFrame.minX + r.minX / scale,
+                              y: displayFrame.minY + headerHeight + r.minY / scale)
+        let world = CGRect(x: topLeft.x, y: topLeft.y, width: r.width / scale, height: r.height / scale)
+        var hit = interiorMarqueeBase
+        for child in model.directChildren(of: node.relPath)
+            where model.effectiveFrame(of: child).intersects(world) {
+            hit.insert(child.id)
+        }
+        model.selection = hit
     }
 
     @ViewBuilder
@@ -1003,6 +1131,12 @@ struct NodeView: View {
         }
         if node.kind == .folder {
             Button("Add Note Inside") { withAnimation(gappSpring) { _ = model.addChildNote(inFolder: node) } }
+            Button(node.isCollapsedFolder ? "Expand Folder" : "Collapse Folder") {
+                withAnimation(gappSpring) { model.toggleCollapse(node.id) }
+            }
+            Button(node.isExpanded ? "Close Folder Note" : "Open Folder Note") {
+                withAnimation(gappSpring) { model.toggleExpand(node.id) }
+            }
         }
         Divider()
         Menu("Color") {
@@ -1119,6 +1253,32 @@ struct NodeView: View {
                 if multi || root == nil { model.endInteraction() }
                 else if let root { model.endDrag(root, at: model.worldFromGlobal(v.location)) }
             }
+    }
+}
+
+/// Whole-box move/select/double-tap gestures. Attached to notes only; a folder is a frame whose
+/// header and interior carry their own gestures (see `folderBox`), so `owns` is false for folders
+/// and this becomes a pass-through. An expanded box masks these to subviews (header drags, body edits).
+private struct BoxGestures<DragG: Gesture>: ViewModifier {
+    let owns: Bool
+    let mask: GestureMask
+    let drag: DragG
+    let onDoubleTap: (CGPoint) -> Void
+    let onTap: () -> Void
+
+    func body(content: Content) -> some View {
+        if owns {
+            content
+                .gesture(drag, including: mask)
+                .gesture(
+                    SpatialTapGesture(count: 2, coordinateSpace: .local)
+                        .onEnded { onDoubleTap($0.location) }
+                        .exclusively(before: SpatialTapGesture(count: 1).onEnded { _ in onTap() }),
+                    including: mask
+                )
+        } else {
+            content
+        }
     }
 }
 
