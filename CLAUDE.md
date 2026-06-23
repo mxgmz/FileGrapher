@@ -72,6 +72,13 @@ Also: `build-app.sh` (assembles + ad-hoc-signs `dist/GraphingApp.app`), `Package
   Edge/link diff is deferred (needs the read-side `[[link]]`→edge auto-draw).
 
 ## Interaction model (locked product decisions)
+- **Folder = frame (locked 2026-06-23 · Sprint 5 · see `docs/DESIGN-interaction-polish.md`).** A folder
+  is a *container*, not a card: its **header bar + border ring** are the live hit regions; the **interior
+  is pass-through** (drag interior → marquee its children; drag header → move the folder). Notes are solid
+  cards. **Nothing overlaps** — a drop **pushes** siblings aside; a **pinned** box is immovable and acts
+  as an obstacle. Folders are **collapsible** (hide children → header + count) and **expandable** (open a
+  folder-note card). *Forward-looking lock — being built in Sprint 5; pre-Sprint-5 behavior still applies
+  until each ticket lands.*
 - `+` side handle = **same-kind sibling**, connected, placed in that direction (note→note, folder→folder).
 - Create a note **inside** a folder: double-click its interior, or the header `+`.
 - Dragging a folder moves its contents; dropping a box inside a folder **re-files it on disk**.

@@ -127,6 +127,145 @@ Max chose to go straight at 3b (accepting it builds some of 3a's ghost grammar a
 
 ---
 
+## 🎨 Sprint 5 — Interaction Polish (CURRENT, planned 2026-06-23)
+**Goal:** make file/folder interactions feel like a polished product — clear hitboxes, no accidental
+triggers, nothing ever overlaps. **Design + locked decisions:** [`DESIGN-interaction-polish.md`](DESIGN-interaction-polish.md).
+**Design law:** "alive but sober."
+
+**🔒 Locked this sprint:** (1) **Folder = frame** — header + border are live, the interior is
+marquee/drop, not a giant click target. (2) **No overlap: a drop pushes siblings; a pinned box is an
+immovable anchor.** (3) Folders are both **collapsible** (hide children) and **expandable** (folder-note
+card).
+
+**Already built — do NOT rebuild** (verified in code 2026-06-23): soft-snap `nearestFreeCenter` (T4
+*replaces* its role, keeps it as fallback); folder frame-resize without rescaling children
+(`resizedFrame`+`contentsBounds` — T5 only adds collapse); `dropTargetId` highlight; marquee/⌘A/
+shift-click/group-move.
+
+**Cross-cutting rules (every ticket):** all geometry through the undo engine (`transaction` /
+`beginInteraction`→`endInteraction`/`endDrag`); reuse `clampCoord`/`clampSize`; new `BoardNode` fields
+`Codable`-optional; `effectiveFrame` is hot — collapse short-circuits it, push caps its cascade; render
+in screen space (never `.scaleEffect`); collapsed nodes stay in `board.json` (excluded only from
+render/hit-test/marquee); never enforce collision on load; headless-test pure geometry; per-ticket
+`./build-app.sh debug` + Max visual pass. See DESIGN §7.
+
+**Build order (deps + blast radius):** T1 → **T2** → T3 → **T4** → T5 → T6 → T7 → T8.
+
+---
+
+- ⬜ **T1 — Hover & cursor feedback** *(low risk, do first — biggest perceived-quality/effort ratio)*
+  - **Do:** on hover, outline the exact hitbox so you see what you'll hit before clicking; set an
+    `NSCursor` per region — open-hand over a drag handle, diagonal-resize over a corner, crosshair over a
+    `+` spawn handle, pointing-hand over a button, arrow over a body.
+  - **Files:** `Canvas.swift` (`NodeView` hover overlay reusing existing `hovering`; `HandleButton` /
+    `ResizeHandle` / `cardHeader` cursors via `.onHover` + `NSCursor.push()/pop()`).
+  - **Risks:** push/pop balance (leak a cursor if `onHover false` is missed); don't fight SwiftUI's
+    default cursors; hover-state churn (already debounced via `hovering`).
+  - **Verify:** hover note/folder-header/corner/`+`/button → correct outline + cursor; leaving restores arrow.
+  - **Deps:** none.
+
+- ⬜ **T2 — Folder = frame hitbox** *(🔒 keystone — high risk, do early & carefully; unblocks T5/T6)*
+  - **Do:** split the folder's live region — **header bar** drags/moves the folder; **border ring**
+    (~8px) resizes/selects; **interior** drag = **marquee its children**, click = select folder,
+    double-click = new note (unchanged). Interior is no longer a move handle.
+  - **Files:** `Canvas.swift` (`folderBox` / `NodeView` — attach `dragGesture` to the header only;
+    give the interior its own marquee-style `DragGesture` + the existing tap/double-tap; border overlay
+    carries resize/selection). Possibly a tiny shared marquee helper so folder-interior and canvas-
+    background marquee behave identically.
+  - **Risks (highest in the sprint):** SwiftUI hit-testing/gesture precedence is finicky — the interior
+    must *marquee on drag* yet *select on click* and *new-note on double-click* without the folder moving;
+    don't regress notes-render-above-folders; don't break the existing canvas-background marquee. Keep
+    `reFileFolder` drop-targeting working (it uses `smallestBox`, unaffected).
+  - **Verify:** drag header → folder moves (carrying contents); drag interior → rubber-bands children;
+    click interior → folder selected; double-click interior → note created there; child notes still
+    clickable/draggable on top; one ⌘Z reverses a header-move.
+  - **Deps:** none (but everything below assumes it).
+
+- ⬜ **T3 — Selected-box chrome: scale & declutter** *(low risk, independent)*
+  - **Do:** clamp the four `+` handles and four resize corners to a screen-pixel size range so they never
+    pile up when a box is small or zoomed out; hide the selection chrome entirely below a zoom threshold
+    (~0.5×); thin the always-four `+` toward hover-side / fewer.
+  - **Files:** `Canvas.swift` (`handles`, `HandleButton`, `ResizeHandle` — they currently use fixed 12px /
+    18px offsets that collide at low zoom).
+  - **Risks:** keep handles grabbable (hit precision) and don't break connect-drag from `+`.
+  - **Verify:** zoom out / shrink a box → no pileup, box still grabbable, connect still works; chrome
+    hides cleanly below threshold.
+  - **Deps:** none.
+
+- ⬜ **T4 — Collision = push, with Pin** *(🔒 central new behavior — med-high risk)*
+  - **Do:** new `BoardNode.pinned`. On drop (and on expand/resize-end), instead of snapping the *mover*
+    away, **keep it and push overlapped siblings** along the min-translation vector, cascading, until no
+    sibling hitboxes intersect. **Pinned** boxes don't move, can't be dragged (lock cursor), and act as
+    obstacles the push routes around; if boxed in, fall back to `nearestFreeCenter` for the mover. Add a
+    Pin toggle (context menu + a small pin glyph on pinned boxes).
+  - **Files:** `Model.swift` (new `pushSiblings`/`resolveOverlaps` solver near `nearestFreeCenter`;
+    `pinned` field; hook in `endDrag` (replace the snap call), `setExpanded`, resize-end; drag gesture
+    early-out for pinned; `setPinned` mutation). `Canvas.swift` (drag gesture skips pinned + lock cursor;
+    pin glyph; context-menu Pin/Unpin).
+  - **Risks:** cascade oscillation/perf → **cap iterations**, accept residual; folder auto-grow re-collide
+    → resolve child-level then folder-level, both capped; all-pinned deadlock → mover-snap fallback;
+    don't enforce on load. Undo: rides `endDrag`'s commit (sibling moves captured in the before/after
+    snapshot) — confirm one ⌘Z reverses the whole push.
+  - **Verify:** drop onto a sibling → sibling slides away, nothing overlaps; pin a box → can't drag it,
+    other boxes push around it; expand a card → neighbors make room; one ⌘Z reverses the whole gesture;
+    loading an already-overlapping board does NOT reshuffle. **Headless-test** the solver + pin-obstacle.
+  - **🔒 Decided:** push **on-drop** (not live during drag) — DESIGN §2/§8.
+  - **Deps:** T2 (stable folder frames) recommended.
+
+- ⬜ **T5 — Folder collapse + empty hint** *(med risk; resize-no-rescale already done)*
+  - **Do:** new `BoardNode.collapsed`. A disclosure ▸ in the header hides children on the canvas and
+    shrinks the frame to header + an "N items" count badge. Empty folders show a faint
+    "double-click or drag notes here" hint.
+  - **Files:** `Model.swift` (`collapsed` field; `effectiveFrame` returns header frame + no child
+    recursion when collapsed; a hidden-descendants set; `toggleCollapse` mutation). `Canvas.swift` (don't
+    render/hit-test hidden nodes; disclosure ▸ + count badge; empty hint). Hide edges with ≥1 hidden endpoint.
+  - **Risks:** hidden nodes must stay in `board.json` + `dragGroup`/`delete`/`sync` (only render/hit-test/
+    marquee exclude them); group-move of a collapsed folder still carries hidden descendants; auto-grow
+    interaction; edges to hidden children.
+  - **Verify:** collapse → children vanish, frame = header + badge; expand → children return in place;
+    dragging a collapsed folder moves the whole subtree; marquee can't grab hidden children; one ⌘Z reverses.
+  - **Deps:** T2.
+
+- ⬜ **T6 — Expandable folders + card polish** *(med risk)*
+  - **Do:** folders get the note's ⤢ expand into an editable **folder-note** card; remember card size
+    across collapse (`BoardNode.cardSize` — today it snaps back to default); clearer edit/preview state;
+    **double-click the card header to rename**.
+  - **Files:** `Model.swift` (relax `setExpanded`/`isExpanded` to folders with a folder-note path
+    resolver, lazy-create on first edit; `cardSize` field; expand triggers T4 push). `Canvas.swift`
+    (folder expanded-card render; ⤢ on folders distinct from the ▸ collapse; header dbl-click rename; edit
+    affordance). Maybe `FileContent.swift`.
+  - **Risks:** ⤢ (open folder-note) vs ▸ (collapse children) are opposite axes — keep affordances
+    distinct; don't create empty folder-note files spuriously; the folder card body must respect the T2
+    frame hitbox; `cardSize` must round-trip undo.
+  - **Verify:** expand folder → folder-note card (created on first edit only); collapse still hides
+    children (separate control); card size persists across collapse/expand; double-click header renames;
+    expanding pushes neighbors.
+  - **🔒 Decided:** folder-note = **`<FolderName>.md` inside the folder** (Obsidian convention), lazy-created on first edit.
+  - **Deps:** T2, T4.
+
+- ⬜ **T7 — Connector polish** *(med risk; independent, lowest priority)*
+  - **Do:** draggable connector **endpoints** (re-route to a different box), optional **label**, and a
+    hover-highlight of the (already 18px) hit zone.
+  - **Files:** `Canvas.swift` (`EdgeLine` hover + endpoint handles when selected + label). `Model.swift`
+    (re-route mutation changes `edge.from/to`; **must rewrite `[[links]]`** via `writeLink`/`removeLink`
+    on old & new source for link-backed edges; `label` field on `BoardEdge`).
+  - **Risks:** re-routing a `linkBacked` edge must keep disk links consistent (remove old, write new);
+    label persistence (Codable-optional); don't disturb the read-side reconcile.
+  - **Verify:** drag an endpoint → edge re-routes and the `[[link]]` follows on disk; label saves +
+    round-trips; hover shows the hit zone; one ⌘Z reverses a re-route (board + both files).
+  - **Deps:** none.
+
+- ⬜ **T8 — Micro-polish & consistency** *(low risk, last — cosmetic sweep)*
+  - **Do:** unify corner radii / stroke weights / shadow depths across note / folder / card / ghost so
+    the family reads as one system; keep all motion on the existing spring + 0.12s vocabulary; ensure
+    selection chrome stays hidden below the T3 zoom threshold; empty-canvas hint.
+  - **Files:** `Canvas.swift` (mostly), maybe `FileContent.swift`.
+  - **Risks:** low (visual only); watch for regressions in the time-travel ghost styling.
+  - **Verify:** side-by-side visual pass at several zooms in light + dark.
+  - **Deps:** pairs with T1/T3.
+
+---
+
 ## 🧭 Humanwise functionality audit (2026-06-21)
 Stories framed as: *"I've used Miro / FigJam / Obsidian Canvas / Whimsical / Excalidraw —
 what do my hands reach for, and what feels broken when it's missing?"* Grouped by expectation

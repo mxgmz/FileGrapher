@@ -5,7 +5,34 @@ open questions. At a session's start, read the top entry to pick up where we lef
 
 ---
 
-## ▶ NEXT SESSION — START HERE · S20 shipped **4 parallel-agent PRs** (Tier-1 UX + reload banner + undo-in-rename)
+## ▶ NEXT SESSION — START HERE · S21 planned **Sprint 5 — Interaction Polish** (design + sprint, NO code yet)
+
+S21 was a **planning session** (Max: brainstorm element interactions → polished product, then "just the
+sprint plan for now"). Deliverables, all docs:
+- **New `docs/DESIGN-interaction-polish.md`** — the design note. **🔒 Locked: (1) Folder = frame**
+  (header + border live, interior = marquee/drop, not a giant click target); **(2) nothing overlaps — a
+  drop *pushes* siblings, a *pinned* box is an immovable anchor**; (3) folders are both collapsible (hide
+  children) and expandable (folder-note card). Plus cross-cutting engineering rules + 4 open decisions.
+- **`docs/BACKLOG.md` → "🎨 Sprint 5"** — 8 tickets T1–T8 (hover/cursors · folder-as-frame · chrome
+  scaling · push+pin · folder collapse · expandable folders/card polish · connector polish · micro-polish),
+  each with do/files/risks/verify/deps. Build order: T1 → **T2** → T3 → **T4** → T5 → T6 → T7 → T8.
+- **`CLAUDE.md`** — folder-as-frame recorded in the locked-decisions section.
+
+**Verified-in-code while planning (don't rebuild):** `nearestFreeCenter` soft-snap exists (T4 *replaces*
+its role with push, keeps it as the boxed-in fallback); folder frame-resize-without-rescale already done
+(`resizedFrame`+`contentsBounds`) so T5 is only collapse + empty hint; `dropTargetId` highlight + marquee/
+⌘A/group-move all exist.
+
+**All 4 open decisions now LOCKED (DESIGN §8):** push **on-drop** (not live); folder-note =
+**`<FolderName>.md` inside** (Obsidian); folder-interior click **selects the folder**; chrome hides below
+**~0.5×** zoom. No forks remain — Sprint 5 is ready to build.
+
+**Next session:** start **T1** (hover + cursors, lowest risk) and **T2** (folder-as-frame, the keystone —
+highest hit-testing risk). No code written this session.
+
+---
+
+## ▶ S20 — shipped **4 parallel-agent PRs** (Tier-1 UX + reload banner + undo-in-rename)
 
 S20 ran an **orchestrated multi-agent** flow: 4 background worktree agents → 4 PRs → inline `/code-review`
 → merged in order. All four are on `main` (squash-merged, integration build clean, app launches 0% CPU). The
