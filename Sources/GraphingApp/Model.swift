@@ -100,11 +100,21 @@ struct BoardNode: Identifiable, Codable, Equatable {
     // Optional so older board.json files (without these keys) still decode.
     var colorName: String?       // BoxColor raw value; nil == app accent
     var fontScale: Double?       // title size multiplier; nil == 1.0
-    var expanded: Bool?          // note shown as an in-place content card; nil/false == title-only
+    var expanded: Bool?          // shown as an in-place content card; nil/false == title-only
+    var collapsed: Bool?         // folder with its children hidden on the canvas; nil/false == open
+    var cardSize: CGSize?        // remembered expanded-card size, so it survives collapse/re-expand
     var fileId: UInt64?          // disk inode — lets syncFromDisk follow a box to a file's new path
+    var pinned: Bool?            // anchored: can't be dragged, and collision push never moves it; nil/false == free
 
-    /// True when this note is showing its content inline as a card.
-    var isExpanded: Bool { (expanded ?? false) && kind == .note }
+    /// True when this box is showing content inline as a card (notes, and folders via their folder-note).
+    var isExpanded: Bool { expanded ?? false }
+
+    /// True when this folder is collapsed (children hidden, frame shrunk to its header).
+    var isCollapsedFolder: Bool { kind == .folder && (collapsed ?? false) }
+
+    /// True when this box is anchored: it can't be dragged and the push solver treats it as an
+    /// immovable obstacle that siblings route around.
+    var isPinned: Bool { pinned ?? false }
 
     /// Resolved accent color (named palette entry, or the app accent as fallback).
     var accent: Color {
@@ -733,8 +743,8 @@ final class AppModel: ObservableObject {
     /// A card/peek entered edit mode for `id`'s note. Track it so an external change to that file
     /// (which the edit-guard would otherwise silently swallow) raises the reload banner.
     func beginEditingFile(_ id: UUID) {
-        guard let n = node(id), n.kind == .note else { return }
-        editingPaths.insert(n.relPath)
+        guard let n = node(id) else { return }
+        editingPaths.insert(contentRel(for: n))
     }
 
     /// A card/peek left edit mode (saved, cancelled, collapsed, or closed). Stop watching it for a
@@ -742,19 +752,20 @@ final class AppModel: ObservableObject {
     /// unsaved to clobber.
     func endEditingFile(_ id: UUID) {
         guard let n = node(id) else { return }
-        editingPaths.remove(n.relPath)
-        diskConflicts.remove(n.relPath)
+        let rel = contentRel(for: n)
+        editingPaths.remove(rel)
+        diskConflicts.remove(rel)
     }
 
     func hasDiskConflict(_ id: UUID) -> Bool {
         guard let n = node(id) else { return false }
-        return diskConflicts.contains(n.relPath)
+        return diskConflicts.contains(contentRel(for: n))
     }
 
     /// Resolve a conflict by discarding local edits: clear the flag so the caller re-reads disk.
     func clearDiskConflict(_ id: UUID) {
         guard let n = node(id) else { return }
-        diskConflicts.remove(n.relPath)
+        diskConflicts.remove(contentRel(for: n))
     }
 
     /// React to a debounced batch of changed vault-relative paths from the watcher.
@@ -1027,8 +1038,10 @@ final class AppModel: ObservableObject {
         let known = Set(board.nodes.map { $0.relPath })
 
         // Add boxes for genuinely-new files, tucked near their parent folder — never a fixed far
-        // corner, which used to strand them and balloon the folder's auto-grown frame.
-        for (index, rel) in diskRels.subtracting(known).sorted().enumerated() {
+        // corner, which used to strand them and balloon the folder's auto-grown frame. A folder-note
+        // (`<FolderName>.md` inside its folder) is the folder box's own content, not a separate box.
+        let folderNoteRels = Set(board.nodes.filter { $0.kind == .folder }.map { folderNoteRel(for: $0) })
+        for (index, rel) in diskRels.subtracting(known).subtracting(folderNoteRels).sorted().enumerated() {
             let isDir = dirRels.contains(rel)
             let size = isDir ? AppModel.folderSize : AppModel.noteSize
             let center = spawnCenter(forNew: rel, index: index)
@@ -1163,9 +1176,10 @@ final class AppModel: ObservableObject {
     /// computes each `effectiveFrame` only for candidates: no full sort, no intermediate arrays.
     private func smallestBox(containing point: CGPoint,
                              where include: (BoardNode) -> Bool = { _ in true }) -> BoardNode? {
-        board.nodes
+        let hidden = hiddenNodeIds
+        return board.nodes
             .compactMap { node -> (node: BoardNode, area: CGFloat)? in
-                guard include(node) else { return nil }
+                guard !hidden.contains(node.id), include(node) else { return nil }
                 let frame = effectiveFrame(of: node)
                 guard frame.contains(point) else { return nil }
                 return (node, frame.width * frame.height)
@@ -1226,6 +1240,85 @@ final class AppModel: ObservableObject {
         return nil
     }
 
+    /// Minimum-translation vector that pushes `mover` out of `obstacle` along the shorter axis of
+    /// their overlap — the smallest nudge that just separates two AABBs. Zero when they don't overlap.
+    static func separationVector(_ mover: CGRect, outOf obstacle: CGRect) -> CGSize {
+        guard mover.intersects(obstacle) else { return .zero }
+        let overlap = mover.intersection(obstacle)
+        if overlap.width <= overlap.height {
+            let dx = mover.midX < obstacle.midX ? -overlap.width : overlap.width
+            return CGSize(width: dx, height: 0)
+        }
+        let dy = mover.midY < obstacle.midY ? -overlap.height : overlap.height
+        return CGSize(width: 0, height: dy)
+    }
+
+    /// Settle the board after `movedId` was dropped/grown/resized: keep the moved box where it is and
+    /// **push overlapping siblings aside** (min-translation, cascading to their neighbors) until no two
+    /// siblings' `effectiveFrame`s intersect. SIBLINGS only (same `parentRel`) — a folder must contain
+    /// its own children, so parent↔child never "collides". A **pinned** sibling never moves: it's an
+    /// obstacle the push routes around. If the mover itself is boxed in by pinned siblings (can't stay
+    /// without overlapping one), fall back to `nearestFreeCenter` for the mover so we never deadlock.
+    /// All sibling moves run before the caller's `commit`, so they ride its single undo step.
+    func resolveOverlaps(movedId: UUID) {
+        guard let mover = node(movedId) else { return }
+        let moverFrame = effectiveFrame(of: mover)
+
+        // Deadlock guard: a pinned sibling can't be pushed, so if the mover overlaps one it must move
+        // itself. Snap it (and its subtree) to the nearest gap clear of ALL siblings, then stop.
+        let pinnedFrames = board.nodes
+            .filter { $0.parentRel == mover.parentRel && $0.id != movedId && $0.isPinned }
+            .map { effectiveFrame(of: $0) }
+        if pinnedFrames.contains(where: { $0.intersects(moverFrame) }) {
+            if let free = nearestFreeCenter(for: movedId, near: mover.center), free != mover.center {
+                moveSubtree(movedId, to: free)
+            }
+            return
+        }
+
+        // Working centers for every same-parent box; the mover is the fixed seed (never re-placed here).
+        let siblings = board.nodes.filter { $0.parentRel == mover.parentRel }
+        var center: [UUID: CGPoint] = Dictionary(uniqueKeysWithValues: siblings.map { ($0.id, $0.center) })
+        let baseFrame: [UUID: CGRect] = Dictionary(uniqueKeysWithValues: siblings.map { ($0.id, effectiveFrame(of: $0)) })
+        func frame(_ id: UUID) -> CGRect {
+            let base = baseFrame[id]!, c = center[id]!, n = node(id)!
+            return base.offsetBy(dx: c.x - n.center.x, dy: c.y - n.center.y)
+        }
+        let pushable = siblings.filter { $0.id != movedId && !$0.isPinned }.map { $0.id }
+
+        // Capped relaxation: each pass pushes every movable sibling out of its deepest current overlap.
+        // Bounded so the cascade (and folder auto-grow re-collisions) can never spin the CPU; a residual
+        // overlap is acceptable — far better than a hang.
+        for _ in 0..<24 {
+            var moved = false
+            for id in pushable {
+                let me = frame(id)
+                // Push out of whichever sibling we overlap most (the mover and pinned boxes included).
+                var worst: (CGRect, CGFloat) = (.null, 0)
+                for other in siblings where other.id != id {
+                    let f = frame(other.id)
+                    let area = me.intersection(f)
+                    let depth = min(area.width, area.height)
+                    if me.intersects(f), depth > worst.1 { worst = (f, depth) }
+                }
+                guard worst.1 > 0 else { continue }
+                let push = AppModel.separationVector(me, outOf: worst.0)
+                guard push != .zero else { continue }
+                center[id] = CGPoint(x: AppModel.clampCoord(center[id]!.x + push.width),
+                                     y: AppModel.clampCoord(center[id]!.y + push.height))
+                moved = true
+            }
+            if !moved { break }
+        }
+
+        // Commit the deltas: translate each pushed sibling (folders carry their whole subtree).
+        for id in pushable {
+            let delta = CGSize(width: center[id]!.x - node(id)!.center.x,
+                               height: center[id]!.y - node(id)!.center.y)
+            if abs(delta.width) > 0.5 || abs(delta.height) > 0.5 { moveSubtree(id, to: center[id]!) }
+        }
+    }
+
     /// Boxes whose parent folder is exactly `relPath` (one level down).
     func directChildren(of relPath: String) -> [BoardNode] {
         board.nodes.filter { $0.parentRel == relPath }
@@ -1250,6 +1343,9 @@ final class AppModel: ObservableObject {
 
     private func effectiveFrame(of node: BoardNode, visited: inout Set<String>, depth: Int) -> CGRect {
         guard node.kind == .folder else { return node.frame }
+        // Collapsed: short-circuit the (hot, recursive) auto-grow — a collapsed folder is just its
+        // header strip + count badge; its children are hidden, so they never widen the frame.
+        if node.isCollapsedFolder { return collapsedFrame(of: node) }
         // Cycle / runaway guard: bail loudly rather than recurse into an infinite loop.
         guard depth < AppModel.maxFolderDepth, visited.insert(node.relPath).inserted else {
             warnFolderCycle(at: node.relPath, depth: depth)
@@ -1285,6 +1381,43 @@ final class AppModel: ObservableObject {
                       y: bounds.minY - pad - AppModel.folderHeaderHeight,
                       width: bounds.width + 2 * pad,
                       height: bounds.height + 2 * pad + AppModel.folderHeaderHeight)
+    }
+
+    /// Width a collapsed folder shrinks to: its header (title + the "N items" badge), never wider
+    /// than its stored frame so collapse only ever shrinks.
+    private static let collapsedFolderWidth: CGFloat = 220
+
+    /// A collapsed folder's frame: just the header strip, anchored at the stored top-left.
+    func collapsedFrame(of node: BoardNode) -> CGRect {
+        let width = min(node.frame.width, AppModel.collapsedFolderWidth)
+        return CGRect(x: node.frame.minX, y: node.frame.minY,
+                      width: width, height: AppModel.folderHeaderHeight)
+    }
+
+    /// Boxes hidden from render / hit-test / marquee because an ancestor folder is collapsed. They
+    /// stay in `board.json`, `dragGroup`, `delete`, and `syncFromDisk` — only the canvas ignores them.
+    var hiddenNodeIds: Set<UUID> {
+        let collapsedPrefixes = board.nodes.filter { $0.isCollapsedFolder }.map { $0.relPath + "/" }
+        guard !collapsedPrefixes.isEmpty else { return [] }
+        var ids = Set<UUID>()
+        for node in board.nodes where collapsedPrefixes.contains(where: { node.relPath.hasPrefix($0) }) {
+            ids.insert(node.id)
+        }
+        return ids
+    }
+
+    func isHidden(_ id: UUID) -> Bool { hiddenNodeIds.contains(id) }
+
+    /// Number of boxes living anywhere inside a folder (for the collapsed "N items" badge).
+    func descendantCount(of node: BoardNode) -> Int {
+        board.nodes.filter { $0.relPath.hasPrefix(node.relPath + "/") }.count
+    }
+
+    /// Collapse / expand a folder (hide or show its descendants). Undoable.
+    func toggleCollapse(_ id: UUID) {
+        guard let idx = board.nodes.firstIndex(where: { $0.id == id }),
+              board.nodes[idx].kind == .folder else { return }
+        transaction { board.nodes[idx].collapsed = !(board.nodes[idx].collapsed ?? false) }
     }
 
     /// Log a folder-graph cycle at most once every 5s (this path can fire every frame).
@@ -1468,6 +1601,15 @@ final class AppModel: ObservableObject {
         commit(before: before, fileUndo: [], fileRedo: [])
     }
 
+    /// End a corner-resize: a box grown on resize can now overlap siblings, so push them aside before
+    /// committing — the push rides this resize's single undo step (same as the drop case).
+    func endResize(_ id: UUID) {
+        guard let before = interactionBefore else { return }
+        interactionBefore = nil
+        resolveOverlaps(movedId: id)
+        commit(before: before, fileUndo: [], fileRedo: [])
+    }
+
     /// End a node drag: re-file into a folder if dropped inside one. Records the
     /// reposition AND any disk move as a single undo step.
     func endDrag(_ id: UUID, at dropPoint: CGPoint) {
@@ -1507,22 +1649,11 @@ final class AppModel: ObservableObject {
             relocate(to: "")
         }
 
-        // Settle on drop: if the box landed overlapping a sibling, slide it (and, for a folder, its
-        // whole subtree) to the nearest free spot. Runs after any re-file so siblings are measured in
-        // the box's final folder; the nudge rides this drag's single undo step. Only new drops settle
-        // — existing overlaps on load are left untouched.
-        let landed = board.nodes[idx].center
-        if let free = nearestFreeCenter(for: id, near: landed), free != landed {
-            let dx = free.x - landed.x, dy = free.y - landed.y
-            board.nodes[idx].center = CGPoint(x: AppModel.clampCoord(free.x), y: AppModel.clampCoord(free.y))
-            if current.kind == .folder {
-                let prefix = board.nodes[idx].relPath + "/"
-                for di in board.nodes.indices where board.nodes[di].relPath.hasPrefix(prefix) {
-                    board.nodes[di].center = CGPoint(x: AppModel.clampCoord(board.nodes[di].center.x + dx),
-                                                     y: AppModel.clampCoord(board.nodes[di].center.y + dy))
-                }
-            }
-        }
+        // Settle on drop: keep the box where the user let go and PUSH overlapped siblings aside (pinned
+        // ones stay put; the mover snaps to a gap only if it's boxed in by pinned siblings). Runs after
+        // any re-file so siblings are measured in the box's final folder; the whole push rides this
+        // drag's single undo step. Only new drops settle — existing overlaps on load are left untouched.
+        resolveOverlaps(movedId: id)
 
         commit(before: before, fileUndo: fU, fileRedo: fR)
     }
@@ -1839,17 +1970,26 @@ final class AppModel: ObservableObject {
     /// Expand/collapse a note into an in-place content card. Expanding grows it to a comfortable size
     /// (keeping any larger custom size); collapsing returns it to the default note size. Undoable.
     func setExpanded(_ id: UUID, _ on: Bool) {
-        guard let idx = board.nodes.firstIndex(where: { $0.id == id }), board.nodes[idx].kind == .note else { return }
+        guard let idx = board.nodes.firstIndex(where: { $0.id == id }) else { return }
         guard (board.nodes[idx].expanded ?? false) != on else { return }
+        let kind = board.nodes[idx].kind
         transaction {
             board.nodes[idx].expanded = on
             if on {
-                board.nodes[idx].width = max(board.nodes[idx].width, AppModel.expandedSize.width)
-                board.nodes[idx].height = max(board.nodes[idx].height, AppModel.expandedSize.height)
+                // Open at the remembered card size (or the default), never below the current frame.
+                let card = board.nodes[idx].cardSize ?? AppModel.expandedSize
+                board.nodes[idx].width = max(board.nodes[idx].width, card.width)
+                board.nodes[idx].height = max(board.nodes[idx].height, card.height)
             } else {
-                board.nodes[idx].width = gappDefaultNoteSize.width
-                board.nodes[idx].height = gappDefaultNoteSize.height
+                // Remember the card size so re-expanding restores it instead of snapping to default,
+                // then shrink back to the box's title-only size.
+                board.nodes[idx].cardSize = CGSize(width: board.nodes[idx].width, height: board.nodes[idx].height)
+                let collapsed = kind == .folder ? AppModel.folderSize : gappDefaultNoteSize
+                board.nodes[idx].width = collapsed.width
+                board.nodes[idx].height = collapsed.height
             }
+            // A bigger card can now overlap its neighbors — push them aside (rides this same step).
+            if on { resolveOverlaps(movedId: id) }
         }
     }
     func toggleExpand(_ id: UUID) {
@@ -1857,13 +1997,25 @@ final class AppModel: ObservableObject {
         setExpanded(id, !(n.expanded ?? false))
     }
 
+    /// A folder's folder-note path (Obsidian convention: `<FolderName>.md` inside the folder). The
+    /// file is created lazily — only on the first edit (`saveFileContent`), never just by expanding.
+    func folderNoteRel(for folder: BoardNode) -> String {
+        "\(folder.relPath)/\((folder.relPath as NSString).lastPathComponent).md"
+    }
+
+    /// The backing file a box's content card reads/writes: a note's own file, or a folder's folder-note.
+    private func contentRel(for node: BoardNode) -> String {
+        node.kind == .folder ? folderNoteRel(for: node) : node.relPath
+    }
+
     /// Text content of a box's backing file ("" if unreadable). While time-traveling this returns the
     /// file's content at the viewed commit (from the historical cache), not the live disk text.
     func fileText(_ id: UUID) -> String {
         guard let n = node(id) else { return "" }
-        if isTimeTraveling { return historicalContent[n.relPath].flatMap { $0 } ?? "" }
+        let rel = contentRel(for: n)
+        if isTimeTraveling { return historicalContent[rel].flatMap { $0 } ?? "" }
         guard let vault else { return "" }
-        return (try? String(contentsOf: vault.url(n.relPath), encoding: .utf8)) ?? ""
+        return (try? String(contentsOf: vault.url(rel), encoding: .utf8)) ?? ""
     }
 
     private func rawWrite(_ rel: String, _ text: String) {
@@ -1872,17 +2024,22 @@ final class AppModel: ObservableObject {
         try? text.data(using: .utf8)?.write(to: vault.url(rel), options: .atomic)
     }
 
-    /// Save edited content back to a box's file as one undoable step (no-op if unchanged).
+    /// Save edited content back to a box's file as one undoable step (no-op if unchanged). For a folder
+    /// this writes its folder-note (`<FolderName>.md`), creating it lazily on this first edit — so a
+    /// folder-note file never appears just from expanding a folder, only from actually editing it.
     func saveFileContent(_ id: UUID, _ text: String) {
         guard !isTimeTraveling else { return }   // history is read-only — never write a past version back
-        guard vault != nil, let n = node(id), n.kind == .note else { return }
-        let rel = n.relPath
-        let old = fileText(id)
+        guard let vault, let n = node(id) else { return }
+        let rel = contentRel(for: n)
+        let old = (try? String(contentsOf: vault.url(rel), encoding: .utf8)) ?? ""
         guard old != text else { return }
+        let existed = vault.exists(rel)
         transaction {
             rawWrite(rel, text)
             txnFileRedo.append { self.rawWrite(rel, text) }
-            txnFileUndo.append { self.rawWrite(rel, old) }
+            // Undo of a first edit removes the just-created folder-note; otherwise restore old text.
+            if existed { txnFileUndo.append { self.rawWrite(rel, old) } }
+            else { txnFileUndo.append { _ = self.rawTrash(rel) } }
         }
     }
 
@@ -1954,6 +2111,23 @@ final class AppModel: ObservableObject {
                 board.nodes[idx].colorName = color?.rawValue
             }
         }
+    }
+
+    /// Pin or unpin one or more boxes. A pinned box can't be dragged and the push solver never moves
+    /// it (it's an obstacle others route around). Undoable. `pinned` is stored as nil when false so old
+    /// board.json round-trips byte-compatibly.
+    func setPinned(_ ids: Set<UUID>, _ on: Bool) {
+        guard !ids.isEmpty else { return }
+        transaction {
+            for id in ids where board.nodes.contains(where: { $0.id == id }) {
+                let idx = board.nodes.firstIndex { $0.id == id }!
+                board.nodes[idx].pinned = on ? true : nil
+            }
+        }
+    }
+    func togglePinned(_ ids: Set<UUID>) {
+        guard let first = ids.first, let n = node(first) else { return }
+        setPinned(ids, !n.isPinned)
     }
 
     /// Set the title text size of one or more boxes. Undoable.
