@@ -24,6 +24,9 @@ struct GraphingAppApp: App {
                     NotificationCenter.default.post(name: .newFolder, object: nil)
                 }
                 .keyboardShortcut("n", modifiers: [.command, .shift])
+                Button("Duplicate") { model.duplicate(model.selection) }
+                    .keyboardShortcut("d", modifiers: .command)
+                    .disabled(model.selection.isEmpty)
             }
             CommandGroup(replacing: .undoRedo) {
                 // ⌘Z / ⇧⌘Z must undo the *text field's* typing while a title (or card body) is being
