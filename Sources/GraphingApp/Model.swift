@@ -997,6 +997,16 @@ final class AppModel: ObservableObject {
 
     // MARK: Disk <-> board sync
 
+    /// Dependency/build output directories that are noise, not notes: opening a code repo as a vault
+    /// otherwise boxes thousands of vendored files (one observed case made ~145 `node_modules` boxes).
+    /// `.git`/`.build` are already skipped by `.skipsHiddenFiles`; these aren't hidden, so we skip them
+    /// (and their whole subtree) by name during the enumerator walk.
+    static let vendorDirNames: Set<String> = [
+        "node_modules", ".build", "dist", "build", "vendor", "Pods",
+        ".next", "target", "__pycache__", ".venv", "venv",
+    ]
+    static func isVendorDir(_ name: String) -> Bool { vendorDirNames.contains(name) }
+
     /// Reconcile the board with what is actually on disk: drop boxes whose file
     /// vanished, and add boxes for files/folders created elsewhere (e.g. Obsidian).
     func syncFromDisk() {
@@ -1014,6 +1024,10 @@ final class AppModel: ObservableObject {
                 let rel = vault.relPath(of: fileURL)
                 if rel.hasPrefix(".graphingapp") || rel.isEmpty { continue }
                 let isDir = (try? fileURL.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory ?? false
+                if isDir, AppModel.isVendorDir(fileURL.lastPathComponent) {
+                    en.skipDescendants()   // don't box the vendor dir or anything inside it
+                    continue
+                }
                 if isDir {
                     diskRels.insert(rel)
                     dirRels.insert(rel)
@@ -1379,7 +1393,17 @@ final class AppModel: ObservableObject {
         func drawNode(_ node: BoardNode) {
             let rect = imgRect(effectiveFrame(of: node))
             let isFolder = node.kind == .folder
-            (isFolder ? NSColor(calibratedRed: 0.90, green: 0.93, blue: 0.99, alpha: 1) : .white).setFill()
+            // Surface the agent's canvas_color coding: a colored node fills with its palette color
+            // (folders as a light wash so children stay legible, notes as a soft tint), falling back
+            // to the fixed folder-blue / note-white only when the node has no color set.
+            let fill: NSColor
+            if let colorName = node.colorName, let boxColor = BoxColor(rawValue: colorName) {
+                let palette = NSColor(boxColor.color)
+                fill = palette.withAlphaComponent(isFolder ? 0.18 : 0.30)
+            } else {
+                fill = isFolder ? NSColor(calibratedRed: 0.90, green: 0.93, blue: 0.99, alpha: 1) : .white
+            }
+            fill.setFill()
             (node.isExpanded ? NSColor.systemBlue : NSColor(white: 0.55, alpha: 1)).setStroke()
             let box = NSBezierPath(roundedRect: rect, xRadius: 8, yRadius: 8)
             box.fill(); box.lineWidth = node.isExpanded ? 2.5 : 1.5; box.stroke()
