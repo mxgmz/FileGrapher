@@ -5,32 +5,68 @@ open questions. At a session's start, read the top entry to pick up where we lef
 
 ---
 
-## ▶ NEXT SESSION — START HERE · S26 — **Edge promotion shipped. Pick a track below.**
+## ▶ NEXT SESSION — START HERE · S27 — **Next big rock: Folder-Canvas Phase 1 (relative-coord migration).**
 
-S25 built **Folder-Canvas Phase 0 — edge promotion** (the lowest-risk, highest-value first build).
-Render-only, no coordinate migration. **Owe one visual eyeball** (see below). Then pick a track.
+S26 ran a **parallel-PR merge train** (the S20/S21 recipe): committed the long-uncommitted S23–25 work as a
+baseline, then shipped **3 PRs** — edge promotion + two cartographer cleanups + T8 polish — all merged to `main`.
+**main @ `1a641c2`, integration build clean, app 0.0% CPU, all 3 headless suites pass.** The small post-Sprint-5
+items are now done; what remains is the big structural one.
 
-**What shipped this session (S25):**
-- `AppModel.promotedEdges` (`Model.swift`, pure over the `collapsed` flags) + `PromotedEdge` struct.
-  Re-anchors each hidden endpoint to its **outermost** collapsed ancestor folder, drops links internal to one
-  collapsed folder, merges parallels into **one weighted connector** (direction preserved). Real edges among
-  visible boxes are untouched — they keep their interactive `EdgeLine`.
-- `PromotedEdgeLine` (`Canvas.swift`) — render-only, never hit-tested; drawn in `promotedEdgeLayer` below the
-  boxes (between `interactiveEdges` and `world`). Thicker line + a count badge for weight > 1.
-- **Headless 8/8** (`Tests/EdgePromotionTests.swift`, run `swift Tests/EdgePromotionTests.swift`): promotion to
-  outermost-not-deeper ancestor, internal-drop, parallel-aggregation→weight, direction, visible-edges-untouched,
-  no-collapse→empty. Build clean; app launches 0.0% CPU.
+**▶ NEXT BUILD: Folder-Canvas Phase 1 — relative-coord migration (`SPEC-folder-canvas.md` §0–3, §5).**
+The scary phase, made boring: *invisible / behavior-preserving first*. board.json v1→v2; reinterpret `BoardNode.x,y`
+as **relative to the parent folder**; derive absolute through ONE chokepoint (`worldCenter`/`effectiveFrame`) so the
+~115 position-readers don't change; keep auto-grow temporarily so it renders pixel-identical. Audit the write paths
+(§5). Gate it with a **headless round-trip test** (migrate a fixture → assert `worldCenter == originalGlobal` for
+every node). Kills the coordinate-meltdown class + makes folders portable. **This is inherently serial** (it owns
+Model.swift's coordinate core) — do it as one focused lane, NOT parallel.
 
-> ⚠️ **OWE MAX A VISUAL EYEBALL** (render-only, logic proven headlessly): collapse two folders that link across
-> each other → expect **one weighted folder↔folder connector** (count badge if >1 link); links wholly inside one
-> collapsed folder vanish; a note→collapsed-folder link becomes a note→folder connector. recordentaln8n (current
-> vault) has the structure to show this — collapse its top-level folders. Use the S19 UI-drive recipe.
+**Owe one visual eyeball** (carried from S26, render-only — logic proven headless 8/8):
+> ⚠️ **Edge promotion:** collapse two folders that link across each other → expect **one weighted folder↔folder
+> connector** (count badge if >1 link); links wholly inside one collapsed folder vanish; a note→collapsed-folder
+> link becomes a note→folder connector. recordentaln8n has the structure — collapse its top-level folders.
+> **Also eyeball** the two render-touching S26 changes: `canvas_screenshot` now shows the agent's `canvas_color`
+> coding (CART), and the T8 visual family (note/folder/card/ghost share radius 12, ring weights, shadows — POLISH;
+> see PR #11 "what to eyeball" list). Use the S19 UI-drive recipe.
 
-**Then pick a track:**
-- **Folder-canvas Phase 1** (the big one): relative-coord migration, *invisible/behavior-preserving* first
-  (board.json v1→v2, derive absolute via one `worldCenter`/`effectiveFrame` chokepoint — see `SPEC-folder-canvas.md` §0–3). Kills the coordinate-meltdown class.
-- **Cartographer next**: `renderBoardPNG` honor `colorName` (screenshots show the agent's colors); add a
-  `node_modules`/vendor skip-list to `syncFromDisk` (recordentaln8n boxed 145 node_modules files).
+---
+
+## S26 — **parallel-PR merge train: edge promotion + cartographer polish + T8 (3 PRs → main)**
+
+Max asked to run the post-Sprint-5 work the documented multi-agent way (S20/S21). How it ran:
+
+**Phase 0 — baseline (the load-bearing fix).** `HEAD` was still `0f16af8` (S22, **pre-MCP**): the entire MCP
+server (S23–24), edge promotion (S25), and 4 vision/spec docs were uncommitted on the working tree. Worktree
+agents fork HEAD, not the dirty tree, so this had to land first. Committed the MCP + docs as baseline `592ab32` →
+pushed `main` (build green). **Edge promotion was split out** (Max chose "PR it, don't baseline it") by saving the
+EP file versions, reverse-editing them out of the baseline, then re-applying on a branch — so the EP diff is
+cleanly isolated from MCP.
+
+**Phase 1 — authored 3 PRs:**
+- **#9 edge promotion** (I authored — already built S25): `AppModel.promotedEdges` + `PromotedEdge` (Model.swift,
+  pure over `collapsed`) re-anchor each hidden endpoint to its **outermost** collapsed ancestor, drop
+  intra-folder links, merge parallels into one weighted connector; render-only `PromotedEdgeLine` (Canvas.swift,
+  below the boxes). Headless **8/8** `Tests/EdgePromotionTests.swift`.
+- **#10 CART** (background worktree agent, Model.swift): `renderBoardPNG` honors `colorName` (folder = 0.18 wash,
+  note = 0.30 tint; fixed defaults when nil) so screenshots show the agent's color-coding; **vendor skip-list**
+  (`vendorDirNames`/`isVendorDir` + `en.skipDescendants()` in `syncFromDisk`) stops node_modules/dist/… boxing.
+  Headless `Tests/VendorSkipTests.swift` (22 assertions).
+- **#11 POLISH** (background worktree agent, Canvas.swift): Sprint-5 **T8** — `enum GappStyle` constants unify
+  corner radius (12), ring weights, dash, shadows across note/folder/card/ghost; transient outlines now scale
+  radius with zoom. Cosmetic only.
+
+**Phase 2 — merge train (serial, me):** inline-reviewed each diff, merged **#9 → #10 → #11** (squash), pulled +
+`./build-app.sh debug` between each, all clean. EP merged first (against unmoved main) so POLISH's Canvas changes
+merged against it last — both Canvas PRs stayed CLEAN (POLISH avoided EP's `EdgeLine`/`promotedEdgeLayer` spots
+as briefed). Worktrees removed, `s6-*` branches deleted. **Integration `main` @ `1a641c2`; all 3 headless suites
+pass; app 0.0% CPU.**
+
+**Lesson (reinforces S20/S22):** the conflict-domain partition held (CART=Model, POLISH=Canvas → zero mutual
+conflict; the cross-file EP overlap resolved by merge order + a "don't restructure these spots" note in the
+agent brief). Parallel saved authoring; review/merge stayed serial. The only real work was the **baseline split**
+— 3 sessions of uncommitted work had to be untangled before any lane could fork.
+
+**Owe a visual pass** (batched, deferred from per-PR per the review workflow): edge promotion (#9), the
+color-aware screenshot (#10), and the T8 family (#11) — all flagged above in START-HERE.
 
 **State / gotchas to carry forward:**
 - ⚠️ **macOS `open dist/GraphingApp.app` launches the app WINDOWLESS** after rapid kill/relaunch cycles (vault

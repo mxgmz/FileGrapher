@@ -17,8 +17,11 @@ Scrum-style board. **Status legend:** ✅ done · 🔄 in progress · ⬜ todo �
   get/create_note/create_folder/link/move/arrange/expand/collapse/resize/color/screenshot. Loopback+token.
 - ✅ **Verified live**: headless Claude Code agent mind-mapped a Japan trip (radial, real wikilinks) and
   tidied recordentaln8n (364→8 boxes) **without touching any project file** (hash + git proven).
-- ⬜ `renderBoardPNG` honor `colorName` (screenshots currently use fixed colors, hide the agent's coding).
-- ⬜ `syncFromDisk` vendor skip-list (`node_modules`/.build/dist) — recordentaln8n boxed 145 node_modules files.
+- ✅ **`renderBoardPNG` honors `colorName` (S26, PR #10)** — colored boxes fill with their palette color
+  (folder 0.18 wash / note 0.30 tint via `NSColor(boxColor.color)`), fixed defaults when nil. *Owe a screenshot eyeball.*
+- ✅ **`syncFromDisk` vendor skip-list (S26, PR #10)** — `vendorDirNames`/`isVendorDir` + `en.skipDescendants()`
+  skip `node_modules`/.build/dist/build/vendor/Pods/.next/target/__pycache__/.venv/venv (and subtrees). Headless 22/22
+  (`Tests/VendorSkipTests.swift`). Caveat: a content folder literally named `build`/`dist`/`target` is also skipped.
 - 🧊 Real cartographer behaviors: gravity, minimal-motion, layout-switching (radial/columns/grid).
 
 ### Epic B — Folders Are Canvases (the spatial foundation)
@@ -286,7 +289,10 @@ render/hit-test/marquee); never enforce collision on load; headless-test pure ge
     round-trips; hover shows the hit zone; one ⌘Z reverses a re-route (board + both files).
   - **Deps:** none.
 
-- ⬜ **T8 — Micro-polish & consistency** *(low risk, last — cosmetic sweep)*
+- ✅ **T8 — Micro-polish & consistency (S26, PR #11)** — `enum GappStyle` in Canvas.swift unifies corner radius
+  (12), ring weights (1 / 1.5 colored / 2.5 selected), dash (`[6,4]`), and shadow (0.12/r4/r7-selected/y2) across
+  note / folder / card / history-ghost; transient accent outlines now scale radius with zoom. Cosmetic only; T3
+  chrome zoom gate left intact. *Owe a visual eyeball (light + dark; see PR #11 list).* **Sprint 5 fully done.**
   - **Do:** unify corner radii / stroke weights / shadow depths across note / folder / card / ghost so
     the family reads as one system; keep all motion on the existing spring + 0.12s vocabulary; ensure
     selection chrome stays hidden below the T3 zoom threshold; empty-canvas hint.
