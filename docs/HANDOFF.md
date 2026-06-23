@@ -5,6 +5,342 @@ open questions. At a session's start, read the top entry to pick up where we lef
 
 ---
 
+## ▶ NEXT SESSION — START HERE · S19 shipped **read-side link auto-draw** + cleared git-time-travel UI debt
+Two things landed S19 (entries below): (1) Sprint 4 P0–P3 git time-travel is **eyeball-verified end-to-end**
+and provably VIEW-ONLY; (2) the **Sprint-3 read-side gap is closed** — `[[link]]`→auto-drawn edges now works
+(unit 9/9 + live integration verified). The living-canvas link spine is now **bidirectional**.
+
+S19 also **built + UI-verified P2 edge/link diff** (edges dim / ghost across time-travel). **Sprint 4 (git
+time-travel) is now fully complete and eyeballed** — only the optional **loupe** polish remains.
+
+**Next builds (pick one):**
+- **The loupe** (Sprint-4 polish) — render the time-travel diff only under a draggable lens. Last Sprint-4 item.
+- **Tier-1 UX** — empty-canvas right-click menu, zoom-to-fit, ⌘+/–/0. Everyday muscle-memory gaps.
+- **Secondary UI-verify debt** (now drivable): S12 connector→wikilink round-trip, marquee, copy/paste, etc.
+
+⚠️ **Live-vault note for the read side:** opening `Graph test` with this build runs the reconcile, which will
+**auto-draw edges for any `[[links]]` in notes' `<!-- canvas-links -->` blocks** and tag them `linkBacked`.
+Pre-existing **hand-drawn edges are preserved** (`linkBacked == nil` is never auto-dropped). It only reads
+notes + rewrites the gitignored `board.json` (never edits note prose). Full state in **BACKLOG**.
+
+### ✅ This env CAN drive + screenshot the UI — and the technique that makes it work
+Big change from S15–S18 ("couldn't screenshot"): **`screencapture` + synthetic input work now.** The recipe,
+because it's fiddly (the `scratchpad/*` helpers below live in ephemeral `/tmp` — **recreate them from these
+descriptions**, they're a few lines each):
+- **Driving clicks/drags:** a tiny compiled Swift **CGEvent** helper (`scratchpad/mouse.swift` → `mouse
+  click|drag|move X Y`). System Events `click at {x,y}` throws **-25200** (don't use it). **NSMenu items
+  (e.g. the branch picker) ignore plain clicks — use press-drag-release** (`mouse drag` from the dropdown to
+  the item).
+- **Focus war:** the host terminal **"Codex" shares GraphingApp's exact window rect** and keeps stealing
+  z-order, so clicks/captures hit Codex. Fix: **hide Codex** (`osascript … set visible of process "Codex" to
+  false`) before any click/capture (see `scratchpad/raise.sh`). ⚠️ **But hiding Codex revokes bash's
+  `~/Documents` file access** (TCC is tied to the host being visible → `git`/`ls`/`cat` give "Operation not
+  permitted"). So **alternate: hide Codex for UI, unhide for git/file ops.** Screenshots write to `/tmp`, so
+  they're unaffected either way. (The Read/Edit/Write tools also keep working regardless.)
+- **Popovers auto-dismiss** when GraphingApp loses focus between Bash calls, so **open-popover + click-target
+  must be in ONE Bash command** (raise → click clock → click button). Retina is **2×**: `screen_pt = px/2`.
+- Accessibility (assistive access for osascript) had to be granted once via System Settings during the run.
+
+### Secondary UI-verification debt (still owed, now checkable with the recipe above)
+Not done in S19 (focused on git time-travel). From earlier sessions, still un-eyeballed: **connector →
+`[[wikilink]]` round-trip** (S12), **live file-watch refresh**, **marquee multi-select / ⌘A / shift-click**,
+**⌘C/⌘X/⌘V**, **Quick Look (Space) + expand cards**. Knock these out on the fixture or a throwaway vault.
+
+---
+
+## 2026-06-22 — Session 19 (cont. 2) — **BUILT: P2 edge/link diff** (edges dim/ghost across time-travel)
+Finished the long-deferred half of Sprint-4 P2, now that edges are link-backed. While scrubbing a commit or
+previewing a branch, the edge layer reflects the **link** state at that revision:
+- a current link edge whose `[[link]]` **didn't exist** at the viewed commit → **dims + dashes** (like an
+  "added later" box);
+- a link that **existed then** but isn't drawn now → a **faded dashed ghost connector** between the two
+  surviving notes (the connector counterpart to the deleted-since `HistoryGhostBox`).
+
+**What shipped (`Model.swift` + `Canvas.swift`, no new files):**
+- **`AppModel.historyEdgeDiff()`** — parses each note's `[[links]]` from the **already-loaded**
+  `historicalContent` (no extra git calls), resolves them via the shared `linkTargetResolver()`, and computes
+  `@Published historyAddedEdges: Set<UUID>` (current link edges absent in history → dim) + `@Published
+  historyGhostEdges: [GhostEdge]` (historical links not drawn now, both endpoints surviving → ghost). Run in
+  `applyHistory`; reset on return-to-live / `closeVault`. New `func isEdgeAbsentInHistory(_:)`.
+- **Refactor:** extracted `linkTargetResolver()` + `unorderedPairKey()` from `reconcileLinkEdges` so the read
+  side and the history diff resolve `[[name]]`→node identically (ambiguity-safe). New `struct GhostEdge`.
+- **`Canvas.swift`:** `EdgeLine` gains `absentInHistory` (dims to 0.3 + dashes the stroke/arrow); the edge
+  `ForEach` passes `model.isEdgeAbsentInHistory(edge.id)`. New render-only **`GhostEdgeLine`** (faded dashed
+  curve + arrowhead) drawn in `historyGhostLayer` for each `historyGhostEdges`, never hit-tested.
+
+**Verified:** `swift build` + `./build-app.sh debug` clean. **Headless 6/6** (`historyEdgeDiff` port + real
+`ManagedLinks`): added=={Apex|Delta}, ghosts=={Apex|Gamma}, present-both neither, identical-history→no-diff,
+link-to-deleted-node→no-ghost, legacy-nil-edge-never-dims. The reconcile harness still **9/9** after the
+helper extraction. **✅ UI-verified by eye** (after the screen unlocked) on the `/tmp/gapp-linkdiff` fixture
+(Apex links Beta+Gamma @v1, Beta+Delta @live): at **Live**, Apex→Beta and Apex→Delta both **solid**, none to
+Gamma. **Scrubbed to v1:** Apex→Beta stayed **solid**, **Apex→Delta dimmed + dashed** (added-later), and a
+**faded dashed Apex→Gamma ghost** appeared (existed then, gone now). **Back to Live** restored both to solid
+and cleared the ghost. (The initial attempt was blocked because the Mac had **locked** mid-session —
+`CGSSessionScreenIsLocked=1` blanks `screencapture` and stops the app drawing a window while locked.)
+
+---
+
+## 2026-06-22 — Session 19 (cont.) — **BUILT: read-side `[[link]]` → auto-drawn edges** (living-canvas spine)
+Closed the long-standing Sprint-3 read-side gap. The managed `<!-- canvas-links -->` block is now the
+**source of truth** for note↔note edges: a `[[Target]]` in the block (written by the app, an agent, or
+another machine) **auto-draws an edge**; a link removed there **drops its edge** — live, via the existing
+`VaultWatcher`→`syncFromDisk`. The write side (S12) + this read side make the bridge bidirectional.
+
+**What shipped (`Model.swift` only — no new files):**
+- **`AppModel.reconcileLinkEdges()`**, called at the end of `syncFromDisk` (after node reconcile + dangling
+  cleanup, before `save`). Reads each note's managed block (`ManagedLinks.targets`), resolves `[[name]]` →
+  node and reconciles `board.edges`. **Ambiguity-safe** (the live vault's many `Untitled`): a name shared by
+  >1 note never auto-draws a guessed edge, and an existing edge is *kept* as long as some link of that name
+  is still in the source block (so a user's edge to an ambiguous target is never destroyed). Resolves
+  `[[Name]]` by basename and `[[folder/Name]]` by path. ponytail: re-reads every note file each sync (fine at
+  this scale; cache by mtime if it bites).
+- **New `BoardEdge.linkBacked: Bool?`** — `true` = this edge IS a disk wikilink (the reconcile owns it; drop
+  it when the link vanishes); `nil` = a **hand-drawn visual edge the reconcile must never delete** (protects
+  every pre-existing edge on the live board). Set at creation in `connect`/`spawn` when both ends are notes;
+  the reconcile upgrades a legacy edge to `linkBacked` when a matching link appears. Codable-optional →
+  old boards decode unchanged.
+
+**Verified:**
+- **Headless 9/9** (ad-hoc harness, like S12's `ManagedLinks` test: real `ManagedLinks` concatenated + a
+  faithful port of the reconcile loop — recreate from the cases here): add, drop, keep-legacy,
+  upgrade-legacy, ambiguous-no-add, ambiguous-keep, path-qualified, visual-untouched, mutual-collapse-to-one.
+- **Live integration** on a throwaway `/tmp/gapp-links` vault (Apex's block links `[[Beta]]`+`[[Gamma]]`;
+  Beta/Gamma/Lonely plain): launched → `board.json` had **exactly 2 edges** `Apex→Beta`, `Apex→Gamma`
+  (`linkBacked=true`), **none to Lonely**. Then **externally removed `[[Gamma]]`** → within ~0.4s the watcher
+  reconciled it to **1 edge** (`Apex→Beta`). `swift build` + `./build-app.sh debug` clean.
+
+**Next up:** P2's deferred **edge/link diff** is now unblocked (edges are link-backed, so a commit/branch diff
+of links is meaningful). Or the loupe / Tier-1 UX. See BACKLOG.
+
+---
+
+## 2026-06-22 — Session 19 — **UI VERIFICATION of Sprint 4 git time-travel (P0–P3) — all PASS, by eye**
+First session that can actually **drive + screenshot** the app. Cleared the entire owed-UI-verify debt for
+the git time-travel feature, on the **throwaway fixture** + a fresh `/tmp` vault (never the live `Graph
+test`). Every stage confirmed visually **and** cross-checked on disk with `git`.
+
+**Verified (all ✅):**
+- **P0 enable** (fresh non-repo `/tmp/gapp-p0`): clock popover showed the **opt-in pane** ("Track this
+  vault's history" + "files are never modified" copy + **Enable Version History**). Clicking it produced on
+  disk: `.git`, `.gitignore` = `.graphingapp/`, one commit `edd066e "Enable Version History — baseline
+  snapshot"` (author **GraphingApp**), tracked = `.gitignore`/`Note.md`/`Second.md` only (**`.graphingapp/`
+  ignored**, `check-ignore` confirms `board.json`), working tree clean.
+- **P0 snapshot** (same vault): external edit to `Note.md` → panel live-updated to "**1 uncommitted change**"
+  + Snapshot enabled → click → new commit `a181e75 "Snapshot 2026-06-22 19:34"`, tree back to clean. (Also
+  triggered the fixture's Snapshot earlier — commit `dfd8a82`, same behaviour.)
+- **P1 scrub** (fixture): dragging the bottom track to **Baseline** reverted card content live — **Welcome**
+  → baseline text, header swapped the edit-pencil for an **orange read-only clock**; **Notes** (added later)
+  showed the **"Not in this version"** placeholder. **Back to Live** restored everything. **Boxes never
+  moved.**
+- **P2 structure** (fixture @ Baseline): **Notes** box **dimmed + dashed** (added-later); deleted-since
+  **Scratch** appeared as a faded **dashed ghost box**. Placement: Scratch is a vault-root file (no surviving
+  parent folder) so it tiled near viewport center — readable and clearly labelled; looked fine, not off.
+- **P3 branch** (fixture): **Preview branch → experiment** → **Spec** card became "**v2 spec on the
+  experiment branch**"; **Ideas** (deleted on the branch) **dimmed** to "Not in this version"; **Experiment**
+  (only-on-branch) ghosted in; purple **"Previewing branch 'experiment' · only-on-branch files show as
+  ghosts"** banner replaced the track, with **Exit**. Exit returned to live (Spec→v1, ghost gone).
+- **VIEW-ONLY proof** (fixture after all of the above): still on branch **`main`**, HEAD `dfd8a82`, working
+  tree **clean**, **reflog shows no session checkouts** (only the fixture's original setup ones). The sole
+  session write was the intentional Snapshot. Scrubbing + branch-preview wrote nothing, checked out nothing.
+
+**How it was driven (so the next session doesn't re-derive it):** compiled `scratchpad/mouse.swift` (CGEvent
+click/drag/move — System Events `click at` throws -25200); **NSMenu branch picker needs press-drag-release**,
+not a click; **hide the host "Codex" process** (it shares GraphingApp's rect & steals z-order) before any
+click/capture, but **unhide it for `git`/file ops** (hiding revokes bash's `~/Documents` TCC access);
+**popover + button click must be one Bash command** (popover dismisses on focus loss); Retina **2×**. All
+captured in the START-HERE block above.
+
+**Cleanup:** restored `defaults … vaultPath` → `Graph test`; removed `/tmp/gapp-p0`. **Fixture left intact**
+at `/Users/maxgomez/Documents/gapp-git-fixture` (disposable; now carries the one app-made `dfd8a82` Snapshot
+commit on `main`) in case Max wants to re-eyeball. Build was already clean from S18 (no code changed this
+session — verification only).
+
+**Next up:** read-side `[[link]]`→edge auto-draw (unblocks P2 edge/link diff); or knock out the secondary UI
+debt (S12 connector→wikilink, live file-watch, marquee, copy/paste, Quick Look) now that the UI is drivable.
+
+---
+
+## 2026-06-22 — Session 18 — Sprint 4 · 3b **P3 built**: branch-as-layer (preview a branch as a ghost overlay)
+Continued from P2. Preview an unmerged branch's state spatially. **Almost entirely reuse** — a branch ref is
+a git revision, so P1's content time-travel + P2's ghost grammar already produce the diff. Still VIEW-ONLY.
+
+**What shipped:**
+- **`AppModel` unified "viewed revision."** Refactored `viewCommit` → private `setViewedRevision(_:branch:)`;
+  `viewCommit(hash)` (scrubber, branch nil) and **`previewBranch(name)`** (P3) both delegate to it. A branch
+  name flows straight through `git show <ref>:<path>` + `filesAtCommit(<ref>)`, so content + added-later
+  dimming + deleted-since ghosts all work against the branch tip vs the live board. New `@Published
+  previewedBranch` (label/axis), `branches`, `currentBranch` (loaded via the extended `GitState`/
+  `loadGitState`). Reset in `closeVault`.
+- **UI (`VersionHistory.swift`).** Panel gains a **branch picker** (shown when `branches.count > 1`): a menu
+  listing branches with a checkmark on the active one; the current-branch entry exits preview. The
+  `CommitScrubber` now shows a **purple branch-preview banner** ("Previewing branch 'X' · only-on-branch
+  files show as ghosts" + **Exit**) in place of the commit track while `previewedBranch != nil`.
+
+**Verified:**
+- **Headless branch-diff, 6/6 PASS** on a throwaway repo: `main` {A,B} vs a `feature` branch that edits A,
+  adds C, deletes B. Confirmed `show("A.md", at:"feature")` = edited; `show("B.md", at:"feature")` = nil (B
+  dims as "not on feature"); `filesAtCommit("feature")` boxable∖live = **{C.md}** (the only-on-branch ghost),
+  content readable. Exactly the inputs `previewBranch` feeds the P1/P2 render path.
+- **Build clean** (no warnings). **App launches, 0% CPU at rest.** **Live `Graph test` unaffected** (not a
+  repo → panel/scrubber/picker all hidden).
+
+> ⚠️ **OWE MAX A UI VERIFY** (needs a multi-branch repo-vault). On a throwaway repo with a second branch:
+> open the clock popover → **Preview branch → pick the other branch** → cards show that branch's content,
+> files only on it appear as ghosts, files not on it dim; the bottom shows the purple banner; **Exit** /
+> picking the current branch returns to live. Nothing on disk changes; no branch is checked out.
+
+**Sprint 4 status:** P0 ✅ P1 ✅ P2 ✅(box half; edge/link diff deferred) P3 ✅. The git time-travel
+prototype arc is **complete**. Remaining refinement in the spec: **the loupe** (render the diff only under a
+draggable lens — focus + perf).
+
+**Next up — options:** (a) **the loupe** (finish Sprint 4's polish); (b) close the **Sprint-3 read-side gap**
+(`[[link]]`→edge auto-draw) which also unblocks P2's deferred **edge/link diff**; (c) back to Tier-1 UX
+(empty-canvas right-click, zoom-to-fit, ⌘+/-/0). Recommend (b) — it's the core living-canvas spine and has
+the widest downstream payoff.
+Continued from P1. The "boxes fade in/out for files added/removed vs now" half. Still **VIEW-ONLY** —
+ghosts are pure render; no disk writes, box positions unchanged.
+
+**What shipped:**
+- **`GitService.filesAtCommit(_:)`** — `git ls-tree -r --name-only <commit>` (with `core.quotePath=false`),
+  the set of files tracked at a commit.
+- **`AppModel` structure diff** — `viewCommit` now also loads `filesAtCommit` and computes
+  `@Published historyGhosts: [HistoryGhost]` = files boxable-and-tracked at the commit but **absent from the
+  live board** (deleted-since). `HistoryGhost` is a transient render-only type (not a `BoardNode`).
+  `deletedSinceGhosts` + `ghostCenter` position each best-effort: stacked **just below a surviving parent
+  folder**, else tiled near the viewport center (no stored layout exists for a deleted file). Reset in
+  `closeVault` / on return to live.
+- **Rendering (`Canvas.swift`)** — **added-later** boxes (exist now, absent at the commit, via
+  `isAbsentInHistory`) render **dimmed (0.3) + dashed outline**. **Deleted-since** files render as
+  `HistoryGhostBox` (faded, dashed, `clock.badge.xmark` + name) in a new `historyGhostLayer` overlay,
+  `allowsHitTesting(false)` so it never eats clicks. Both fade with `.opacity` transition as you scrub.
+
+**Verified:**
+- **Headless structure-diff logic** on a throwaway repo (v1: Old+Gone → v2: edit Old, add New, delete Gone):
+  `filesAtCommit` correct; New is added-later (absent at v1); the deleted-since set (after the boxable
+  filter, which correctly drops the baseline-committed `.gitignore`) = **{Gone.md}**, content readable at
+  v1. (GitService `show`/`commits`/`diff`/`filesAtCommit` all proven.)
+- **Build clean** (no warnings). **App launches, 0% CPU at rest.** **Live `Graph test` unaffected** (not a
+  repo → no scrubber, no ghosts).
+
+> ⚠️ **OWE MAX A UI VERIFY** (positions of deleted ghosts are heuristic — eyeball needed). On a throwaway
+> repo with history: scrub back → notes created later **dim + dash**; a note you deleted reappears as a
+> faded dashed ghost beneath its old folder; **Back to Live** clears both. Tell me if the ghost placement
+> looks off — it's the deliberately-approximate part (no stored layout for deleted files).
+
+**Deferred from P2 (noted, not done):** **edge/link diff** ("edges draw/dissolve for link changes"). It
+depends on the still-unbuilt **read-side `[[link]]`→edge auto-draw** (Sprint 3) — today's `board.edges` are
+user-drawn, so few are link-backed and a diff would be mostly inert. Do the read-side first, then revisit.
+
+**Next up — Sprint 4 · P3 (Branch-as-layer):** overlay an unmerged branch's state as a translucent ghost
+(`GitService.branches()` exists). Or close the Sprint-3 gap first (read-side link auto-draw), which also
+unlocks the deferred edge diff above. Later: the loupe (diff under a draggable lens).
+
+---
+
+## 2026-06-22 — Session 16 — Sprint 4 · 3b **P1 built**: commit scrubber + content time-travel
+Continued straight from P0. **VIEW-ONLY honored** — scrubbing only re-routes card/peek *content*; box
+positions never move and disk is never written while viewing history.
+
+**What shipped:**
+- **`AppModel` time-travel** (`// MARK: Time-travel`): `@Published viewedCommit` (nil == live) +
+  `isTimeTraveling`; `viewCommit(hash)` loads every note's content at that commit **off-main** (`git show`
+  per relPath, `updateValue` so an absent file stores a real `nil` rather than dropping the key) into a
+  `historicalContent` cache, then bumps `diskRevision` so open cards/peeks re-read. **`fileText` is now
+  commit-aware** (returns cached historical text while traveling, live disk text otherwise);
+  `isAbsentInHistory` reports a file that didn't exist at the viewed commit; **`saveFileContent` no-ops
+  while traveling** (history is read-only). Reset in `closeVault`.
+- **`CommitScrubber`** (in `VersionHistory.swift`, mounted as a bottom overlay on `CanvasView`) — a track
+  with one stop per commit + a rightmost **Live** stop; tap/drag snaps to the nearest stop and calls
+  `viewCommit`. Label shows the viewed commit (short-hash · subject · relative date) or "Live", a busy
+  spinner, and a **Back to Live** button. Shown only when version history is enabled and there's ≥1 commit
+  (so it's invisible on the non-repo live vault). Stop math: stop 0 = oldest … stop `count` = live.
+- **Read-only affordances** in the expanded card (`Canvas.swift`) and peek (`FileContent.swift`): the edit
+  pencil is replaced by an orange clock while traveling; an absent file renders a **"Not in this version"**
+  placeholder (`clock.badge.xmark`); an `.onChange(of: viewedCommit)` drops any in-progress edit and reloads
+  (the `diskRevision` reload is otherwise skipped while editing).
+
+**Verified:**
+- **Headless P1 routing, 7/7 PASS** on a throwaway repo: built a 2-commit history where v2 adds `New.md` +
+  edits `Old.md`, then reproduced exactly `viewCommit`'s cache build + `fileText`/`isAbsentInHistory`
+  routing: at HEAD both notes show v2 content; at v1 `Old.md` shows the **old** text and `New.md` is
+  **ABSENT** (→ "Not in this version", routes to empty text). (GitService's own `show`/`commits`/`diff`
+  were 22/22 in S15.)
+- **Build clean** (`./build-app.sh debug`, no warnings). **App launches, stays alive** ~0–2.5% CPU.
+  **Live `Graph test` vault unaffected** — not a repo, so the scrubber stays hidden and nothing changed.
+
+> ⚠️ **OWE MAX A UI VERIFY** (can't drive the scrubber/cards headlessly). On a **throwaway** repo-vault with
+> a few commits: drag the bottom strip left → expanded cards show that commit's content, the header shows a
+> read-only clock, a note added after that commit reads "Not in this version"; **Back to Live** restores.
+> Confirm boxes don't move while scrubbing and that no file is modified on disk.
+
+**Next up — Sprint 4 · P2 (Structure + link diff):** boxes fade in/out for files added/removed vs now;
+edges draw/dissolve for link changes (the 3a ghost grammar). `GitService.diffNameStatus(from:to:)` already
+exists for it. Still VIEW-ONLY. (Then P3 branch-as-layer; later the loupe.)
+
+---
+
+## 2026-06-22 — Session 15 — Sprint 4 · 3b **P0 built**: git plumbing + opt-in + read-only commit list
+Took 3b straight off the design (entry below) and built **P0**. **VIEW-ONLY honored** — the only disk
+writes are the opt-in `git init` and explicit Snapshot commits; nothing checks out/restores/overwrites
+the working tree.
+
+**What shipped:**
+- **New `Sources/GraphingApp/GitService.swift`** — pure Foundation, zero-dep shell-out to `/usr/bin/git`
+  (`-C <vault>`), the `ManagedLinks`/`VaultWatcher` precedent. Read-only: `isRepo` (symlink-safe
+  `show-toplevel`==root, so a vault merely *nested* in another repo reads false), `currentBranch`,
+  `branches`, `commits` (unit-separator pretty-format → `Commit` structs, newest-first), `uncommittedChangeCount`
+  (`status --porcelain`), `show(path,at:)` (`git show <c>:<path>`), `diffNameStatus(from:to:)`. Two opt-in
+  writes only: `enableVersionHistory` (`init` + append `.graphingapp/` to `.gitignore` + `add -A` + baseline
+  commit) and `snapshot` (`add -A` + commit, false when nothing staged). Robust `Process` runner drains
+  stderr on a side queue (no deadlock); commits fall back to a local `user.name/email` if the repo has no
+  identity; env sets `GIT_TERMINAL_PROMPT=0`.
+- **Wired into `AppModel`** (`// MARK: Version history`): `@Published versionHistoryEnabled / commits /
+  uncommittedCount / gitBusy`; `gitService` accessor; `refreshVersionHistory` / `enableVersionHistory` /
+  `snapshot` run git **off the main thread** (`Task.detached` → `nonisolated loadGitState` → main-actor
+  `apply`). `refreshVersionHistory()` on `openVault` (read-only — does NOT enable); state reset in
+  `closeVault`. `handleDiskChange` now also filters `.git` paths (the watcher shouldn't churn on commit
+  plumbing).
+- **New `Sources/GraphingApp/VersionHistory.swift` + TopBar clock button** — popover: opt-in pane
+  ("Enable Version History", explains files are never modified) when not a repo, else a **Snapshot** button
+  (disabled when clean) + a scrollable read-only commit list (subject · short-hash · author · relative date).
+  Clock tints when enabled.
+
+**Verified:**
+- **GitService headless, 22/22 PASS** on a throwaway temp repo (NOT the live vault — S14 lesson): not-a-repo
+  → enable → `.gitignore` has `.graphingapp/` → 1 baseline commit → sidecar write stays *clean* (ignored) →
+  snapshot-when-clean returns false → edit → 1 change → snapshot → 2 commits newest-first → `show` returns
+  original vs edited content → `diff --name-status` reports the changed file only.
+- **Build clean** (`./build-app.sh debug`, no warnings — cleared a Swift-6 `self`-capture warning by hopping
+  through the main-actor `apply` instead of a nested `MainActor.run`).
+- **App launches, stays alive** ~0–3% CPU (no spin). **Live `Graph test` vault confirmed untouched** after
+  launch — no `.git`, no `.gitignore` (open only *reads* `isRepo`).
+
+> ⚠️ **OWE MAX A UI/DISK VERIFY** (can't drive the popover headlessly). On a **throwaway** vault (do NOT
+> enable on the live `Graph test` unless Max wants its history tracked): click the **clock** in the top bar →
+> "Enable Version History" → a `.git` + `.gitignore` (listing `.graphingapp/`) appear and one baseline commit
+> shows. Edit a note → the panel shows "1 uncommitted change" → **Snapshot** → a new commit appears. Confirm
+> `board.json` is gitignored (positions don't time-travel).
+
+**Next up — Sprint 4 · P1 (Scrubber + content time-travel):** a bottom commit strip (right edge = working
+"live", then HEAD back); dragging it sets the viewed commit; expanded cards render `git show <commit>:<path>`;
+positions stay fixed. GitService already exposes `show`/`commits`/`diffNameStatus` for it. Keep VIEW-ONLY.
+
+---
+
+## 2026-06-22 — Direction set — next: Living Canvas 3b · Git time-travel (prototype) — DESIGN ONLY, no code yet
+Max picked **3b (git branch visualization / history)** as the next build, straight at it. Full plan +
+locked decisions in **BACKLOG "Sprint 4 · 3b"**. The essentials for whoever picks this up:
+- **VIEW-ONLY is non-negotiable** — render past state via `git show`; **never** `git checkout` or write
+  the user's files. The canvas is a viewer over history; disk stays at working state.
+- Locked: **opt-in `git init`** ("Enable Version History" button — vault isn't a repo yet); **manual
+  Snapshot** commits (no auto-commit); **board.json gitignored** (positions don't time-travel); **git CLI**
+  shell-out (zero-dep); **build/test on a throwaway repo-vault, not live `Graph test`**.
+- Start at **P0** (git plumbing + opt-in + read-only commit list) before any canvas morphing.
+- Status check that prompted this: git time-travel was **0% started** and the vault **is not a repo** —
+  this is the furthest-out, git-gated item; P0 de-risks it.
+
+---
+
 ## 2026-06-22 — Session 14 — folder geometry fixes: move-aware sync · heal stranded children · spawn-near-parent
 **Context:** after live-watching shipped, a folder rename "broke it" — sidebar didn't update + a **huge,
 unclickable Folder 7**. Probe (`/tmp/fsprobe.swift`) found a directory rename emits **only the two dir

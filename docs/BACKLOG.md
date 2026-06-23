@@ -37,17 +37,21 @@ Committed:
 *what & why*; the table below is the *what-to-build*. Design law for all of it: **"alive but sober."**
 
 Committed (Phase 1 — notes linking + live read, **no git required**):
-- 🔄 **Connector → real `[[wikilink]]`** — ✅ **write side (S12):** drawing an edge between two `.md`
-  notes (manual connect, `+`-handle spawn) writes `[[Target]]` into the source note's managed
-  `<!-- canvas-links -->` block; deleting the edge removes it; **undo reverses canvas + disk together**
-  (rides the existing paired transaction engine via `rewriteFile`). ⬜ *Read side still pending* (below).
+- ✅ **Connector → real `[[wikilink]]` (bidirectional, S12 write + S19 read)** — ✅ **write side (S12):**
+  drawing an edge between two `.md` notes (manual connect, `+`-handle spawn) writes `[[Target]]` into the
+  source note's managed `<!-- canvas-links -->` block; deleting removes it; **undo reverses canvas + disk
+  together**. ✅ **read side (S19):** see below — the block now auto-draws/drops edges live.
 - ✅ **Managed-links block round-trip (S12)** — `ManagedLinks` (`Links.swift`) owns *only* the text
   between the markers; user prose is never touched. Headless-tested (12 cases: seams, dedup,
   alias/heading strip, removal, round-trip). *(Optional YAML-frontmatter mirror still parked.)*
-- ⬜ **Read side: `[[links]]` → auto-drawn edges** — a file linked in Obsidian or by an agent shows its
-  edge on the canvas. Edge *style* (color/curve/arrow/label) persists in `board.json` keyed to `(from→to)`.
-  *(Next increment: reconcile disk wikilinks → `board.edges` in `syncFromDisk`; resolve `[[name]]` →
-  node by basename. Watch the "Untitled" basename collisions in the live vault.)*
+- ✅ **Read side: `[[links]]` → auto-drawn edges (S19)** — `AppModel.reconcileLinkEdges()` in `syncFromDisk`
+  makes each note's managed block the source of truth: a `[[Target]]` (app/agent/other-machine) auto-draws an
+  edge live (via `VaultWatcher`); a removed link drops its edge. New `BoardEdge.linkBacked` separates real
+  link edges from hand-drawn ones — **legacy edges are never auto-dropped**. **Ambiguity-safe** for the live
+  vault's many `Untitled` (no guessed auto-draw; an existing edge is kept while its name persists in the
+  block). Resolves `[[Name]]` by basename, `[[folder/Name]]` by path. Headless 9/9 + live integration
+  verified. *(Reading prose wikilinks outside the managed block is deferred — the block round-trips cleanly
+  with edge-delete; prose links can't be removed by deleting an edge.)*
 - ✅ **Live file-watching (S12)** — `VaultWatcher` (FSEvents, debounced): **content** (open cards/peeks
   re-read via `diskRevision`, edit-guarded) and **structure** (create/delete/move boxes via
   `syncFromDisk`) update live, with **self-write suppression** so the app's own writes don't loop. *Links*
@@ -65,6 +69,57 @@ Committed (Phase 1 — notes linking + live read, **no git required**):
 Later phases (tracked in the spec, not this sprint): **P2** typed/labeled links · **P3** code references
 (derived + comment-annotation) · **P4** folder-notes · **3a** ghost overlay + live block-flow + soft-lock
 + presence · **3b** git time-travel (loupe review, commit scrubber, branch-as-layer).
+
+---
+
+## 🔮 Sprint 4 (planned, design locked 2026-06-22) — Living Canvas 3b · Git time-travel (prototype)
+**Goal:** scrub the canvas through the **vault's** git history — **VIEW-ONLY** (render past state via
+`git show`; never `git checkout` or touch the user's files; disk always stays at working state).
+Max chose to go straight at 3b (accepting it builds some of 3a's ghost grammar along the way).
+
+**Decisions locked:**
+- **Enablement = opt-in `git init`** — an explicit **"Enable Version History"** button (vault isn't a repo
+  yet): `git init` + `.gitignore` the `.graphingapp/` sidecar + an initial commit. Non-destructive to files.
+- **History = manual Snapshot** — a "Snapshot" button commits current state on demand; the user's own git
+  commits also appear. (No auto-commit-on-change — too noisy for the prototype.)
+- **board.json gitignored** — layout/positions never time-travel (the "stable stage", spec §5.3).
+- **Zero-dep** — shell out to the `git` CLI; graceful "git not found / not a repo" fallback.
+- **Build & test on a throwaway repo-vault, NOT the live `Graph test`** (S14 lesson: don't touch the live vault).
+
+**Stages:**
+- ✅ **P0 — Plumbing + opt-in (S15).** `GitService.swift` (pure Foundation, zero-dep git shell-out,
+  VIEW-ONLY): repo detection (`isRepo`), `enableVersionHistory` (init + gitignore `.graphingapp/` + baseline
+  commit), `snapshot`, and read-only `commits`/`branches`/`currentBranch`/`uncommittedChangeCount`/`show`/
+  `diffNameStatus`. Wired into `AppModel` (off-main, `versionHistoryEnabled`/`commits`/`uncommittedCount`/
+  `gitBusy`); top-bar **clock popover** (`VersionHistory.swift`) = opt-in pane → Snapshot + read-only commit
+  list. **Headless-tested 22/22 on a throwaway repo**; build clean; app alive; live vault untouched.
+  ✅ *UI/disk-verified S19* — opt-in pane → Enable → `.git`+`.gitignore(.graphingapp/)`+baseline commit
+  (author GraphingApp, sidecar ignored); external edit → "1 uncommitted change" → Snapshot → new commit.
+- ✅ **P1 — Scrubber + content time-travel (S16).** `CommitScrubber` bottom strip (right = live, drag left
+  through HEAD→older) drives `AppModel.viewCommit`; expanded cards **and** peeks render `git show
+  <commit>:<path>` (via a `historicalContent` cache + commit-aware `fileText`); **box positions stay fixed**,
+  disk untouched, editing disabled while traveling, absent files show "Not in this version". **Headless 7/7**
+  on a throwaway repo (incl. the added-later→absent path); build clean; app alive; live vault unaffected.
+  ✅ *UI-verified S19* — scrub to Baseline reverts card text + shows orange read-only clock + "Not in this
+  version"; Back to Live restores; boxes never moved; nothing written on disk.
+- 🔄 **P2 — Structure + link diff (S17, box half done).** ✅ **Boxes fade in/out**: files added *after* the
+  viewed commit dim + dash (`isAbsentInHistory`); files deleted *since* show as render-only `HistoryGhost`
+  placeholders (`GitService.filesAtCommit` + `deletedSinceGhosts`, best-effort position below the surviving
+  parent folder). Headless-verified; build clean; live vault unaffected. ✅ *Edge/link diff built (S19)* —
+  `historyEdgeDiff()` parses each note's `[[links]]` from the loaded `historicalContent` (no extra git):
+  current link edges absent at the commit **dim+dash** (`isEdgeAbsentInHistory`/`historyAddedEdges`); links
+  present then but undrawn now render as faded **`GhostEdgeLine`** ghosts (`historyGhostEdges`). Shared
+  `linkTargetResolver` with the read side. Headless **6/6**; build clean. ✅ *UI-verified S19* — at v1,
+  Apex→Beta solid, Apex→Delta dim+dashed (added-later), faded Apex→Gamma ghost (existed then); Back to Live
+  restored both + cleared the ghost. ✅ *Ghost (box) placement UI-verified S19*. **P2 feature-complete.**
+- ✅ **P3 — Branch-as-layer (S18).** `AppModel.previewBranch(name)` views another branch's tip via the same
+  `setViewedRevision` machinery as the commit scrubber (a branch ref is a revision): the branch's content
+  shows in cards, files only on the branch appear as deleted-since ghosts, files not on it dim. Branch picker
+  in the panel (`branches.count > 1`); purple preview banner + Exit in the scrubber. **Headless 6/6** on a
+  throwaway repo (edit/add/delete across branches); build clean; live vault unaffected. ✅ *UI-verified S19*
+  — Preview branch → experiment: Spec→v2, Ideas dims, Experiment ghosts in, purple banner + Exit → live.
+  VIEW-ONLY proven: fixture stayed on `main`, clean, no session checkouts in reflog.
+- Later refinement: **the loupe** — render the diff only under a draggable lens (focus + perf).
 
 ---
 

@@ -126,6 +126,7 @@ struct MainView: View {
 struct TopBar: View {
     @EnvironmentObject var model: AppModel
     @Binding var showSidebar: Bool
+    @State private var showHistory = false
 
     var body: some View {
         HStack(spacing: 10) {
@@ -179,6 +180,16 @@ struct TopBar: View {
                 }
                 .buttonStyle(.borderless)
                 .help("Reset zoom")
+            }
+
+            Button { showHistory.toggle() } label: {
+                Image(systemName: "clock.arrow.circlepath")
+                    .foregroundStyle(model.versionHistoryEnabled ? AnyShapeStyle(.tint) : AnyShapeStyle(.primary))
+            }
+            .buttonStyle(.borderless)
+            .help("Version history")
+            .popover(isPresented: $showHistory, arrowEdge: .bottom) {
+                VersionHistoryView().environmentObject(model)
             }
 
             Button {

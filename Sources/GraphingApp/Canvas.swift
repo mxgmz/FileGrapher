@@ -23,6 +23,7 @@ struct CanvasView: View {
                 grid.allowsHitTesting(false)
                 interactiveEdges
                 world
+                historyGhostLayer
                 dropTargetOutline
                 pendingConnector
                 handles
@@ -31,6 +32,7 @@ struct CanvasView: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .clipped()
+            .overlay(alignment: .bottom) { CommitScrubber() }
             .background(
                 GeometryReader { g in
                     Color.clear
@@ -339,7 +341,8 @@ struct CanvasView: View {
             ForEach(model.board.edges) { edge in
                 if let g = edgeGeometry(edge) {
                     EdgeLine(edge: edge, p1: g.0, c1: g.1, c2: g.2, p2: g.3,
-                             selected: model.selectedEdge == edge.id)
+                             selected: model.selectedEdge == edge.id,
+                             absentInHistory: model.isEdgeAbsentInHistory(edge.id))
                 }
             }
         }
@@ -361,6 +364,24 @@ struct CanvasView: View {
             ForEach(notes) { node in placed(node) }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    /// Deleted-since ghosts (files present at the viewed commit, gone now). Render-only, never hit-tested.
+    @ViewBuilder
+    private var historyGhostLayer: some View {
+        if model.isTimeTraveling {
+            // Ghost connectors first, so a ghost box draws over its own dangling endpoints.
+            ForEach(model.historyGhostEdges) { ghost in
+                if let g = edgeGeometry(BoardEdge(from: ghost.from, to: ghost.to)) {
+                    GhostEdgeLine(p1: g.0, c1: g.1, c2: g.2, p2: g.3).transition(.opacity)
+                }
+            }
+            ForEach(model.historyGhosts) { ghost in
+                HistoryGhostBox(ghost: ghost)
+                    .position(model.worldToScreen(ghost.center))
+                    .transition(.opacity)
+            }
+        }
     }
 
     private func placed(_ node: BoardNode) -> some View {
@@ -506,6 +527,49 @@ func gappArrowhead(tip: CGPoint, from: CGPoint) -> Path {
     return p
 }
 
+/// A faded, dashed placeholder for a file that existed at the viewed commit but is gone now. Render-only
+/// (no select/drag/hit-testing) — it just shows "this used to be here" while time-traveling.
+private struct HistoryGhostBox: View {
+    @EnvironmentObject var model: AppModel
+    let ghost: HistoryGhost
+    private var scale: CGFloat { model.zoom }
+
+    var body: some View {
+        HStack(spacing: 6 * scale) {
+            Image(systemName: "clock.badge.xmark").font(.system(size: 12 * scale))
+            Text(ghost.name).font(.system(size: 13 * scale, weight: .medium)).lineLimit(1)
+        }
+        .padding(.horizontal, 10 * scale)
+        .frame(width: ghost.size.width * scale, height: ghost.size.height * scale, alignment: .leading)
+        .foregroundStyle(.secondary)
+        .background(RoundedRectangle(cornerRadius: 10 * scale)
+            .fill(Color(nsColor: .windowBackgroundColor).opacity(0.5)))
+        .overlay(RoundedRectangle(cornerRadius: 10 * scale)
+            .stroke(style: StrokeStyle(lineWidth: 1.5 * scale, dash: [5 * scale, 4 * scale]))
+            .foregroundStyle(.secondary.opacity(0.6)))
+        .opacity(0.6)
+        .allowsHitTesting(false)
+    }
+}
+
+/// A faded, dashed ghost connector for a `[[link]]` that existed at the viewed commit but isn't drawn now.
+/// Render-only, never hit-tested — the connector counterpart to `HistoryGhostBox`.
+private struct GhostEdgeLine: View {
+    let p1, c1, c2, p2: CGPoint
+    private var path: Path {
+        var p = Path(); p.move(to: p1); p.addCurve(to: p2, control1: c1, control2: c2); return p
+    }
+    var body: some View {
+        ZStack {
+            path.stroke(Color.secondary.opacity(0.3),
+                        style: StrokeStyle(lineWidth: 2, lineCap: .round, dash: [5, 4]))
+            gappArrowhead(tip: p2, from: c2).fill(Color.secondary.opacity(0.3))
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .allowsHitTesting(false)
+    }
+}
+
 struct EdgeLine: View {
     @EnvironmentObject var model: AppModel
     let edge: BoardEdge
@@ -514,6 +578,7 @@ struct EdgeLine: View {
     let c2: CGPoint
     let p2: CGPoint
     let selected: Bool
+    var absentInHistory = false   // link not in the viewed commit → dim + dash ("added later")
 
     private var linePath: Path {
         var p = Path()
@@ -536,9 +601,10 @@ struct EdgeLine: View {
                 linePath.stroke(edge.color.opacity(0.28),
                                 style: StrokeStyle(lineWidth: 9, lineCap: .round))
             }
-            linePath.stroke(edge.color,
-                            style: StrokeStyle(lineWidth: selected ? 3 : 2, lineCap: .round))
-            if edge.isDirected { arrowPath.fill(edge.color) }
+            linePath.stroke(edge.color.opacity(absentInHistory ? 0.3 : 1),
+                            style: StrokeStyle(lineWidth: selected ? 3 : 2, lineCap: .round,
+                                               dash: absentInHistory ? [6, 4] : []))
+            if edge.isDirected { arrowPath.fill(edge.color.opacity(absentInHistory ? 0.3 : 1)) }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         // Hit area is only the fattened line, so taps off the line fall through to the canvas.
@@ -593,6 +659,8 @@ struct NodeView: View {
     private var scale: CGFloat { model.zoom }
     private var isSelected: Bool { model.selection.contains(node.id) }
     private var isEditing: Bool { model.editingId == node.id }
+    /// While time-traveling, this box's file didn't exist yet at the viewed commit (added-later).
+    private var isHistoryGhost: Bool { model.isAbsentInHistory(node.id) }
 
     var body: some View {
         // When expanded, the box's own drag/tap are masked to subviews so the card body can
@@ -600,7 +668,14 @@ struct NodeView: View {
         let mask: GestureMask = node.isExpanded ? .subviews : .all
         content
             .frame(width: displayFrame.width * scale, height: displayFrame.height * scale)
-            .opacity(model.cutIds.contains(node.id) ? 0.45 : 1)   // pending-cut source, dimmed
+            .opacity(model.cutIds.contains(node.id) ? 0.45 : (isHistoryGhost ? 0.3 : 1))   // cut source / added-later ghost
+            .overlay {   // added-later: a dashed outline marks "not in this version yet"
+                if isHistoryGhost {
+                    RoundedRectangle(cornerRadius: 10 * scale)
+                        .stroke(style: StrokeStyle(lineWidth: 1.5 * scale, dash: [5 * scale, 4 * scale]))
+                        .foregroundStyle(.secondary.opacity(0.7))
+                }
+            }
             .overlay(alignment: .topTrailing) { if node.kind == .note && !node.isExpanded { expandChevron } }
             .contentShape(Rectangle())
             .gesture(dragGesture, including: mask)
@@ -665,6 +740,12 @@ struct NodeView: View {
             let fresh = model.fileText(node.id)
             if fresh != cardText { cardText = fresh; cardDraft = fresh }
         }
+        .onChange(of: model.viewedCommit) { _, _ in
+            // Entering/leaving time-travel: history is read-only, so drop any edit and show this
+            // commit's content (the diskRevision reload above is skipped while editing).
+            cardEditing = false
+            cardText = model.fileText(node.id); cardDraft = cardText
+        }
         .onDisappear { if cardEditing { model.saveFileContent(node.id, cardDraft) } }
     }
 
@@ -673,7 +754,11 @@ struct NodeView: View {
             Image(systemName: noteIconName).foregroundStyle(node.accent).font(.system(size: 13 * scale))
             title.font(.system(size: 13 * scale, weight: .semibold)).lineLimit(1)
             Spacer(minLength: 4 * scale)
-            if node.fileType == .markdown {
+            if model.isTimeTraveling {
+                Image(systemName: "clock.arrow.circlepath")
+                    .font(.system(size: 11 * scale)).foregroundStyle(.orange)
+                    .help("Viewing history — read-only")
+            } else if node.fileType == .markdown {
                 Button { toggleCardEdit() } label: {
                     Image(systemName: cardEditing ? "eye" : "square.and.pencil").font(.system(size: 11 * scale))
                 }
@@ -696,7 +781,14 @@ struct NodeView: View {
     @ViewBuilder
     private var cardBody: some View {
         Group {
-            if cardEditing && node.fileType == .markdown {
+            if model.isAbsentInHistory(node.id) {
+                VStack(spacing: 6 * scale) {
+                    Image(systemName: "clock.badge.xmark").font(.system(size: 22 * scale))
+                    Text("Not in this version").font(.system(size: 12 * scale))
+                }
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if cardEditing && node.fileType == .markdown {
                 TextEditor(text: $cardDraft)
                     .font(.system(size: 13 * scale, design: .monospaced))
                     .padding(8 * scale)

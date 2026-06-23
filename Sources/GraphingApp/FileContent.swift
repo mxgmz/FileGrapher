@@ -73,6 +73,10 @@ struct FilePeekCard: View {
             let fresh = model.fileText(node.id)
             if fresh != loaded { loaded = fresh; draft = fresh }
         }
+        .onChange(of: model.viewedCommit) { _, _ in
+            editing = false   // history is read-only
+            loaded = model.fileText(node.id); draft = loaded
+        }
     }
 
     private var header: some View {
@@ -80,7 +84,10 @@ struct FilePeekCard: View {
             Image(systemName: iconName).foregroundStyle(node.accent)
             Text(node.name).fontWeight(.semibold).lineLimit(1)
             Spacer(minLength: 8)
-            if node.fileType == .markdown {
+            if model.isTimeTraveling {
+                Image(systemName: "clock.arrow.circlepath").foregroundStyle(.orange)
+                    .help("Viewing history — read-only")
+            } else if node.fileType == .markdown {
                 Button { toggleEdit() } label: {
                     Image(systemName: editing ? "eye" : "square.and.pencil")
                 }
@@ -98,6 +105,21 @@ struct FilePeekCard: View {
 
     @ViewBuilder
     private var content: some View {
+        if model.isAbsentInHistory(node.id) {
+            VStack(spacing: 8) {
+                Image(systemName: "clock.badge.xmark").font(.system(size: 26))
+                Text("Not in this version").font(.callout)
+            }
+            .foregroundStyle(.secondary)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .padding(40)
+        } else {
+            liveContent
+        }
+    }
+
+    @ViewBuilder
+    private var liveContent: some View {
         switch node.fileType {
         case .markdown:
             if editing {

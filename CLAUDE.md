@@ -34,6 +34,8 @@ SwiftPM executable, single target `GraphingApp`. Source in `Sources/GraphingApp/
 | `VaultWatcher.swift` | `VaultWatcher` — zero-dep FSEvents wrapper (CoreServices). Watches the vault tree, debounces, reports changed vault-relative paths. The read side of live updates: drives `AppModel.handleDiskChange` → `diskRevision` (cards re-read) + `syncFromDisk` (structure). ⚠️ Needs `kFSEventStreamCreateFlagUseCFTypes` or the callback crashes. |
 | `Sidebar.swift` | File/folder tree (`OutlineGroup`) built from the same nodes as the canvas. |
 | `FileContent.swift` | The content **peek** popover (`FilePeekOverlay`/`FilePeekCard`), a zero-dep Markdown block renderer (`MarkdownView`/`MarkdownBlock`), and a read-only CSV table (`CSVTableView`/`CSV`). |
+| `GitService.swift` | `GitService` — pure (Foundation-only) zero-dep shell-out to the `git` CLI for the vault. **VIEW-ONLY** by contract (Living Canvas time-travel, Sprint 4): the only writes are `enableVersionHistory` (opt-in `git init` + ignore `.graphingapp/` + baseline commit) and `snapshot`; everything else reads (`commits`/`branches`/`uncommittedChangeCount`/`show`/`diffNameStatus`). Never checks out/restores. Headless-tested. |
+| `VersionHistory.swift` | `VersionHistoryView` — the top-bar clock popover: opt-in pane when the vault isn't a repo, else Snapshot + read-only commit list + a **branch picker** (`previewBranch`). Also `CommitScrubber` — the bottom strip: drag the commit track (right = live) to `viewCommit`, or show a **branch-preview banner** with Exit when `previewedBranch != nil`. Render-only `HistoryGhostBox` (deleted-since ghosts) lives in `Canvas.swift`. |
 
 Also: `build-app.sh` (assembles + ad-hoc-signs `dist/GraphingApp.app`), `Package.swift`.
 
@@ -58,6 +60,16 @@ Also: `build-app.sh` (assembles + ad-hoc-signs `dist/GraphingApp.app`), `Package
 - **Input.** One `NSEvent` local monitor in `CanvasView` handles two-finger scroll→pan,
   pinch & ⌘-scroll→cursor-anchored zoom, and Delete/Backspace→trash. It's gated to the canvas
   region via `model.canvasFrameGlobal` so the sidebar still scrolls normally.
+- **Version history / time-travel (`GitService`) is VIEW-ONLY.** ⚠️ Opt-in `git init` + manual
+  `snapshot` are the **only** disk writes; **never** `git checkout`/`reset`/`restore` the user's
+  files. Scrubbing a past commit only re-routes card/peek *content* (`fileText` → `git show` cache when
+  `viewedCommit != nil`); **box positions never move** and `board.json` is **gitignored** (layout never
+  time-travels — the "stable stage"). Editing is disabled while `isTimeTraveling`. Structure diff (P2):
+  boxes for files added *after* the viewed commit dim + dash (`isAbsentInHistory`); files deleted *since*
+  it appear as render-only `HistoryGhost` placeholders (best-effort position). Edge/link diff is deferred.
+  Branch-as-layer (P3): `previewBranch(name)` views another branch's tip via the *same* machinery (a branch
+  ref is a revision) — `setViewedRevision` unifies scrubber + branch preview; `previewedBranch` is the label.
+  Edge/link diff is deferred (needs the read-side `[[link]]`→edge auto-draw).
 
 ## Interaction model (locked product decisions)
 - `+` side handle = **same-kind sibling**, connected, placed in that direction (note→note, folder→folder).

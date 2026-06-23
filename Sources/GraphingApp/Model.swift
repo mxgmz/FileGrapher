@@ -188,6 +188,8 @@ struct BoardEdge: Identifiable, Codable, Equatable {
     var colorName: String?   // BoxColor raw value; nil == default secondary
     var directed: Bool?      // nil/true == arrowhead at `to`
     var styleRaw: String?    // EdgeStyle raw value; nil == curved
+    var linkBacked: Bool?    // true == this edge IS a `[[wikilink]]` on disk (read side owns it); nil == a
+                             // hand-drawn visual edge the link-reconcile must never delete
 
     var style: EdgeStyle { EdgeStyle(rawValue: styleRaw ?? "") ?? .curved }
     var isDirected: Bool { directed ?? true }
@@ -279,6 +281,25 @@ struct ClipboardEntry {
     var descendants: [BoardNode]
 }
 
+/// A transient, render-only ghost for a file that existed at the viewed commit but is gone from the
+/// working tree now (the "fade in" half of the time-travel structure diff). NOT a `BoardNode` — it
+/// isn't on disk or in `board.json` and is never selected/dragged; it only visualizes "this used to be
+/// here." Position is best-effort (no stored layout for a deleted file).
+struct HistoryGhost: Identifiable, Equatable {
+    let id: String        // the file's vault-relative path (stable within one commit view)
+    let name: String
+    let center: CGPoint
+    let size: CGSize
+}
+
+/// A `[[link]]` that existed at the viewed commit but isn't drawn now — rendered as a faded ghost
+/// connector between the two surviving notes. Render-only, never hit-tested (the time-travel link diff).
+struct GhostEdge: Identifiable, Equatable {
+    let id: String        // order-independent node-pair key
+    let from: UUID
+    let to: UUID
+}
+
 // MARK: - App model
 
 @MainActor
@@ -341,6 +362,42 @@ final class AppModel: ObservableObject {
     /// Vault-relative paths the app itself just wrote, with the time of the write — so the watcher can
     /// tell our own echo from a genuine external change and not loop or re-sync needlessly.
     private var selfWrites: [String: Date] = [:]
+
+    // MARK: Version history (git time-travel — VIEW-ONLY)
+
+    /// True when the open vault is a git repo (version history enabled). Mirrors `GitService.isRepo`.
+    @Published private(set) var versionHistoryEnabled = false
+    /// Newest-first commits of the vault, for the history panel.
+    @Published private(set) var commits: [GitService.Commit] = []
+    /// Uncommitted changes in the working tree, so the UI can tell whether a Snapshot would do anything.
+    @Published private(set) var uncommittedCount = 0
+    /// Local branch names and the current one (for branch-preview, P3).
+    @Published private(set) var branches: [String] = []
+    @Published private(set) var currentBranch = ""
+    /// The branch whose tip is being previewed as a ghost overlay (nil == not previewing a branch). When
+    /// set, `viewedCommit` holds that branch ref and the structure diff reads against the live board.
+    @Published private(set) var previewedBranch: String?
+    /// A git operation (enable / snapshot / refresh) is running off the main thread.
+    @Published private(set) var gitBusy = false
+
+    /// The commit whose content the canvas is currently showing, or nil for the live working tree.
+    /// VIEW-ONLY time-travel (P1): only card/peek *content* changes — boxes never move and disk is
+    /// never written while a past commit is viewed.
+    @Published private(set) var viewedCommit: String?
+    /// relPath → that file's content at `viewedCommit` (a nil value means the file didn't exist there).
+    /// Loaded off the main thread when a commit is selected, so cards can read historical text fast.
+    private var historicalContent: [String: String?] = [:]
+    /// Render-only ghosts for files that existed at `viewedCommit` but are gone now (deleted-since).
+    @Published private(set) var historyGhosts: [HistoryGhost] = []
+    /// Render-only ghost connectors for `[[links]]` that existed at `viewedCommit` but aren't drawn now.
+    @Published private(set) var historyGhostEdges: [GhostEdge] = []
+    /// Current link edges whose link didn't exist at `viewedCommit` — drawn dimmed/dashed ("added later").
+    @Published private(set) var historyAddedEdges: Set<UUID> = []
+
+    var isTimeTraveling: Bool { viewedCommit != nil }
+
+    /// A view-only git client for the open vault, or nil when no vault is open.
+    private var gitService: GitService? { vault.map { GitService(root: $0.root) } }
 
     private let defaultsKey = "vaultPath"
 
@@ -548,6 +605,7 @@ final class AppModel: ObservableObject {
         syncFromDisk()
         didInitView = false
         startWatching()
+        refreshVersionHistory()
     }
 
     func closeVault() {
@@ -555,6 +613,17 @@ final class AppModel: ObservableObject {
         vault = nil
         board = BoardData()
         selection = []
+        versionHistoryEnabled = false
+        commits = []
+        uncommittedCount = 0
+        branches = []
+        currentBranch = ""
+        previewedBranch = nil
+        viewedCommit = nil
+        historicalContent = [:]
+        historyGhosts = []
+        historyGhostEdges = []
+        historyAddedEdges = []
         UserDefaults.standard.removeObject(forKey: defaultsKey)
     }
 
@@ -586,7 +655,8 @@ final class AppModel: ObservableObject {
     /// React to a debounced batch of changed vault-relative paths from the watcher.
     func handleDiskChange(_ rels: [String]) {
         guard vault != nil else { return }
-        let relevant = rels.filter { !$0.hasPrefix(".graphingapp") }   // our own board.json isn't content
+        // Our own board.json sidecar, and git's `.git/` + `.gitignore` plumbing, aren't user content.
+        let relevant = rels.filter { !$0.hasPrefix(".graphingapp") && !$0.hasPrefix(".git") }
         guard !relevant.isEmpty else { return }
         // Any content change (ours or external) → open cards/peeks re-read. The views guard against
         // clobbering an in-progress edit; re-reading after our own link-write is what makes a drawn
@@ -596,7 +666,203 @@ final class AppModel: ObservableObject {
         // create/move/trash already updated the board in its transaction — and never mid-interaction,
         // so a drag/resize isn't yanked out from under the user.
         let hasExternal = relevant.contains { !isRecentSelfWrite($0) }
-        if hasExternal, interactionBefore == nil { syncFromDisk() }
+        // Also hold the rebuild while the user is typing in a card/peek/rename field: mutating
+        // board.nodes under an open editor churns the view and can strand keyboard focus, leaving you
+        // unable to edit anything else. The deferred reconcile catches up on the next change / manual ↻.
+        let isTypingInField = editingId != nil || NSApp.keyWindow?.firstResponder is NSText
+        if hasExternal, interactionBefore == nil, !isTypingInField { syncFromDisk() }
+    }
+
+    // MARK: Version history operations (off the main thread — git can block)
+
+    /// The displayable git state, loaded together so one background hop refreshes the whole panel.
+    private struct GitState: Sendable {
+        var enabled: Bool
+        var commits: [GitService.Commit]
+        var uncommitted: Int
+        var branches: [String]
+        var currentBranch: String
+    }
+
+    /// Read git state off the main actor. `nonisolated` so it can run on a detached task.
+    nonisolated private static func loadGitState(_ git: GitService) -> GitState {
+        let enabled = git.isRepo
+        return GitState(enabled: enabled,
+                        commits: enabled ? git.commits() : [],
+                        uncommitted: enabled ? git.uncommittedChangeCount() : 0,
+                        branches: enabled ? git.branches() : [],
+                        currentBranch: enabled ? git.currentBranch() : "")
+    }
+
+    private func apply(_ state: GitState) {
+        versionHistoryEnabled = state.enabled
+        commits = state.commits
+        uncommittedCount = state.uncommitted
+        branches = state.branches
+        currentBranch = state.currentBranch
+        gitBusy = false
+    }
+
+    /// Detect whether the open vault has version history and load its commits. Cheap; safe to re-call.
+    func refreshVersionHistory() {
+        guard let git = gitService else {
+            apply(GitState(enabled: false, commits: [], uncommitted: 0, branches: [], currentBranch: ""))
+            return
+        }
+        runGit { AppModel.loadGitState(git) }
+    }
+
+    /// Opt in to version history: `git init` + ignore the layout sidecar + a baseline commit.
+    func enableVersionHistory() {
+        guard let git = gitService, !versionHistoryEnabled else { return }
+        Log.disk.notice("enabling version history (git init) for the vault")
+        runGit { _ = git.enableVersionHistory(); return AppModel.loadGitState(git) }
+    }
+
+    /// Commit the current working tree on demand (manual Snapshot), then refresh the commit list.
+    func snapshot() {
+        guard let git = gitService, versionHistoryEnabled else { return }
+        Log.disk.notice("taking a version-history snapshot")
+        runGit { _ = git.snapshot(); return AppModel.loadGitState(git) }
+    }
+
+    /// Run a git `work` block off the main thread (it can block on disk), then apply the resulting
+    /// state on the main actor. `gitBusy` gates overlapping operations and drives the panel spinner.
+    private func runGit(_ work: @escaping @Sendable () -> GitState) {
+        guard !gitBusy else { return }
+        gitBusy = true
+        Task.detached { [weak self] in
+            let state = work()
+            await self?.apply(state)   // `apply` is main-actor-isolated; this hops back on its own
+        }
+    }
+
+    // MARK: Time-travel (view a past commit's content — positions stay fixed, disk untouched)
+
+    /// Switch the canvas to a past commit's content (or back to live when `hash` is nil). Loads each
+    /// note's content at that commit off the main thread, then refreshes open cards/peeks via
+    /// `diskRevision`. Box positions never change — only what the content surfaces render.
+    /// View a past commit on the current branch (the scrubber). `nil` returns to the live working tree.
+    func viewCommit(_ hash: String?) { setViewedRevision(hash, branch: nil) }
+
+    /// Preview another branch's tip as a ghost overlay (P3). `nil` exits back to live. A branch name is a
+    /// valid git revision, so the same content + structure-diff machinery as the commit scrubber applies:
+    /// files only on the branch appear as deleted-since ghosts, files not on it dim as added-later.
+    func previewBranch(_ name: String?) { setViewedRevision(name, branch: name) }
+
+    /// Show a git revision (a commit hash, or a branch ref when `branch` is set) — or the live working
+    /// tree when `revision` is nil. Loads each note's content + the file list at that revision off the
+    /// main thread, then refreshes cards/ghosts. Box positions never move; disk is never written.
+    private func setViewedRevision(_ revision: String?, branch: String?) {
+        guard revision != viewedCommit || branch != previewedBranch else { return }
+        previewedBranch = branch
+        viewedCommit = revision
+        guard let revision, let git = gitService else {
+            historicalContent = [:]
+            historyGhosts = []
+            historyGhostEdges = []
+            historyAddedEdges = []
+            diskRevision &+= 1   // back to live: cards re-read from disk
+            return
+        }
+        let rels = board.nodes.filter { $0.kind == .note }.map(\.relPath)
+        gitBusy = true
+        Task.detached { [weak self] in
+            var cache: [String: String?] = [:]
+            // updateValue (not subscript) so an absent file stores a real nil rather than dropping the key.
+            for rel in rels { cache.updateValue(git.show(rel, at: revision), forKey: rel) }
+            let tracked = git.filesAtCommit(revision)
+            await self?.applyHistory(content: cache, trackedAtCommit: tracked)
+        }
+    }
+
+    private func applyHistory(content: [String: String?], trackedAtCommit: [String]) {
+        historicalContent = content
+        historyGhosts = deletedSinceGhosts(trackedAtCommit: trackedAtCommit)
+        let (added, ghostEdges) = historyEdgeDiff()
+        historyAddedEdges = added
+        historyGhostEdges = ghostEdges
+        gitBusy = false
+        diskRevision &+= 1   // open cards/peeks re-read → historical text
+    }
+
+    /// Ghosts for files tracked at the viewed commit but absent from the working tree now. Positioned
+    /// best-effort — stacked just below a surviving parent folder, else tiled near the viewport center.
+    private func deletedSinceGhosts(trackedAtCommit: [String]) -> [HistoryGhost] {
+        let liveRels = Set(board.nodes.map(\.relPath))
+        let deleted = trackedAtCommit
+            .filter { AppModel.boxableExts.contains(($0 as NSString).pathExtension.lowercased()) }
+            .filter { !liveRels.contains($0) }
+            .sorted()
+        var countByParent: [String: Int] = [:]
+        return deleted.map { rel in
+            let parent = (rel as NSString).deletingLastPathComponent
+            let index = countByParent[parent, default: 0]
+            countByParent[parent] = index + 1
+            let display = ((rel as NSString).lastPathComponent as NSString).deletingPathExtension
+            return HistoryGhost(id: rel, name: display,
+                                center: ghostCenter(parentRel: parent, index: index),
+                                size: AppModel.noteSize)
+        }
+    }
+
+    private func ghostCenter(parentRel: String, index: Int) -> CGPoint {
+        let columns = 3
+        let dx = CGFloat(index % columns) * (AppModel.noteSize.width + 22)
+        let dy = CGFloat(index / columns) * (AppModel.noteSize.height + 22)
+        if !parentRel.isEmpty,
+           let folder = board.nodes.first(where: { $0.kind == .folder && $0.relPath == parentRel }) {
+            let frame = effectiveFrame(of: folder)   // stack beneath the surviving folder
+            let x = frame.minX + AppModel.noteSize.width / 2 + dx
+            let y = frame.maxY + AppModel.noteSize.height / 2 + 20 + dy
+            return CGPoint(x: AppModel.clampCoord(x), y: AppModel.clampCoord(y))
+        }
+        let center = screenToWorld(CGPoint(x: viewport.width / 2, y: viewport.height / 2))
+        return CGPoint(x: AppModel.clampCoord(center.x - 220 + dx),
+                       y: AppModel.clampCoord(center.y + 140 + dy))
+    }
+
+    /// True while viewing history when the node's file did not exist at the viewed commit.
+    func isAbsentInHistory(_ id: UUID) -> Bool {
+        guard isTimeTraveling, let n = node(id) else { return false }
+        if let content = historicalContent[n.relPath] { return content == nil }
+        return false   // not loaded yet → not (yet) known absent
+    }
+
+    /// True while viewing history when this link edge's `[[link]]` did not exist at the viewed commit.
+    func isEdgeAbsentInHistory(_ id: UUID) -> Bool { historyAddedEdges.contains(id) }
+
+    /// The link diff for the viewed commit, parsed from the already-loaded `historicalContent` (no extra
+    /// git calls): current link edges whose `[[link]]` is absent there (→ dim), and links present there
+    /// but not drawn now (→ ghost in). Both endpoints must still resolve to surviving notes.
+    private func historyEdgeDiff() -> (added: Set<UUID>, ghosts: [GhostEdge]) {
+        guard isTimeTraveling else { return ([], []) }
+        let resolve = linkTargetResolver()
+        var historicalPairs = Set<String>()
+        var historicalLinks: [(from: UUID, to: UUID)] = []
+        for n in board.nodes where isLinkable(n) {
+            guard let text = historicalContent[n.relPath].flatMap({ $0 }) else { continue }
+            for target in ManagedLinks.targets(in: text) {
+                guard let toId = resolve(target), toId != n.id else { continue }
+                historicalPairs.insert(unorderedPairKey(n.id, toId))
+                historicalLinks.append((n.id, toId))
+            }
+        }
+        var currentPairs = Set<String>()
+        var added = Set<UUID>()
+        for edge in board.edges where edge.linkBacked == true {
+            let key = unorderedPairKey(edge.from, edge.to)
+            currentPairs.insert(key)
+            if !historicalPairs.contains(key) { added.insert(edge.id) }
+        }
+        var ghosts: [GhostEdge] = []
+        var seen = Set<String>()
+        for link in historicalLinks {
+            let key = unorderedPairKey(link.from, link.to)
+            guard !currentPairs.contains(key), seen.insert(key).inserted else { continue }
+            ghosts.append(GhostEdge(id: key, from: link.from, to: link.to))
+        }
+        return (added, ghosts)
     }
 
     var vaultName: String { vault?.root.lastPathComponent ?? "No Vault" }
@@ -667,7 +933,76 @@ final class AppModel: ObservableObject {
         // Clean up dangling edges.
         let ids = Set(board.nodes.map { $0.id })
         board.edges.removeAll { !ids.contains($0.from) || !ids.contains($0.to) }
+        reconcileLinkEdges()
         save()
+    }
+
+    /// Read side of the living-canvas link bridge: each note's managed `<!-- canvas-links -->` block is
+    /// the source of truth for the edges between notes. A `[[Target]]` written into the block — by the
+    /// app, an agent, or another machine — gets an edge here; a link removed there drops its edge. Edges
+    /// with any non-note endpoint, and pre-link hand-drawn note edges (`linkBacked == nil`), are never
+    /// touched. **Ambiguity-safe:** a name shared by several notes (the live vault's many "Untitled")
+    /// never auto-draws a guessed edge, and an existing edge is kept as long as *some* link of that name
+    /// is still in the source's block — so a user's edge to an ambiguous target isn't destroyed.
+    /// ponytail: re-reads every note file each sync — fine at this vault scale; cache by mtime if it bites.
+    private func reconcileLinkEdges() {
+        guard let vault else { return }
+        let resolve = linkTargetResolver()
+
+        // The link-name strings listed in each note's managed block, read from disk.
+        var blockNames: [UUID: Set<String>] = [:]
+        for node in board.nodes where isLinkable(node) {
+            guard let text = try? String(contentsOf: vault.url(node.relPath), encoding: .utf8) else { continue }
+            let names = Set(ManagedLinks.targets(in: text))
+            if !names.isEmpty { blockNames[node.id] = names }
+        }
+        // The names by which a target node could be addressed in a block (bare or path-qualified).
+        func names(of node: BoardNode) -> [String] {
+            [node.name, (node.relPath as NSString).deletingPathExtension]
+        }
+
+        // 1. Keep / upgrade / drop existing note↔note edges against the blocks on disk.
+        var covered = Set<String>()
+        var rebuilt: [BoardEdge] = []
+        for var edge in board.edges {
+            guard let a = node(edge.from), let b = node(edge.to), isLinkable(a), isLinkable(b) else {
+                rebuilt.append(edge); continue        // any non-note endpoint → visual edge, untouched
+            }
+            let linkPresent = blockNames[a.id].map { block in names(of: b).contains { block.contains($0) } } ?? false
+            if !linkPresent && edge.linkBacked == true { continue }   // a real link, now gone → drop it
+            if linkPresent { edge.linkBacked = true }                 // confirm/upgrade a still-present link
+            covered.insert(unorderedPairKey(a.id, b.id))              // keep (legacy or still-linked)
+            rebuilt.append(edge)
+        }
+        board.edges = rebuilt
+
+        // 2. Auto-draw an edge for each block link that resolves uniquely and has no edge yet.
+        for (sourceId, targets) in blockNames {
+            for target in targets {
+                guard let toId = resolve(target), toId != sourceId,
+                      covered.insert(unorderedPairKey(sourceId, toId)).inserted else { continue }
+                board.edges.append(BoardEdge(from: sourceId, to: toId, linkBacked: true))
+            }
+        }
+    }
+
+    /// A resolver from a wikilink target string to a unique current note id — `[[Name]]` by basename,
+    /// `[[folder/Name]]` by path — refusing a name shared by several notes (the live vault's many
+    /// "Untitled"), so no wrong edge is ever guessed. Shared by the read-side reconcile and the link diff.
+    private func linkTargetResolver() -> (String) -> UUID? {
+        var idByName: [String: UUID] = [:]
+        var ambiguous = Set<String>()
+        var idByPath: [String: UUID] = [:]
+        for n in board.nodes where isLinkable(n) {
+            idByPath[(n.relPath as NSString).deletingPathExtension] = n.id
+            if idByName[n.name] != nil { ambiguous.insert(n.name) } else { idByName[n.name] = n.id }
+        }
+        return { target in idByPath[target] ?? (ambiguous.contains(target) ? nil : idByName[target]) }
+    }
+
+    /// Order-independent key for a node pair, so an edge and its reverse count as the same connection.
+    private func unorderedPairKey(_ a: UUID, _ b: UUID) -> String {
+        [a.uuidString, b.uuidString].sorted().joined(separator: "|")
     }
 
     /// The file's inode — stable across renames/moves on the same volume, so `syncFromDisk` can follow
@@ -1135,8 +1470,10 @@ final class AppModel: ObservableObject {
         transaction {
             let newId = node.kind == .folder ? addFolder(inDir: dir, at: c) : addNote(inDir: dir, at: c)
             if let newId {
-                board.edges.append(BoardEdge(from: node.id, to: newId))
-                if let sibling = self.node(newId) { writeLink(from: node, to: sibling) }
+                let sibling = self.node(newId)
+                let real = isLinkable(node) && sibling.map { isLinkable($0) } == true
+                board.edges.append(BoardEdge(from: node.id, to: newId, linkBacked: real ? true : nil))
+                if let sibling { writeLink(from: node, to: sibling) }
             }
         }
     }
@@ -1381,9 +1718,12 @@ final class AppModel: ObservableObject {
         setExpanded(id, !(n.expanded ?? false))
     }
 
-    /// Current text content of a box's backing file ("" if unreadable).
+    /// Text content of a box's backing file ("" if unreadable). While time-traveling this returns the
+    /// file's content at the viewed commit (from the historical cache), not the live disk text.
     func fileText(_ id: UUID) -> String {
-        guard let vault, let n = node(id) else { return "" }
+        guard let n = node(id) else { return "" }
+        if isTimeTraveling { return historicalContent[n.relPath].flatMap { $0 } ?? "" }
+        guard let vault else { return "" }
         return (try? String(contentsOf: vault.url(n.relPath), encoding: .utf8)) ?? ""
     }
 
@@ -1395,6 +1735,7 @@ final class AppModel: ObservableObject {
 
     /// Save edited content back to a box's file as one undoable step (no-op if unchanged).
     func saveFileContent(_ id: UUID, _ text: String) {
+        guard !isTimeTraveling else { return }   // history is read-only — never write a past version back
         guard vault != nil, let n = node(id), n.kind == .note else { return }
         let rel = n.relPath
         let old = fileText(id)
@@ -1529,9 +1870,11 @@ final class AppModel: ObservableObject {
               !board.edges.contains(where: { ($0.from == from && $0.to == to) ||
                                              ($0.from == to && $0.to == from) }) else { return false }
         transaction {
-            let edge = BoardEdge(from: from, to: to)
+            let a = node(from), b = node(to)
+            let real = a.map { isLinkable($0) } == true && b.map { isLinkable($0) } == true
+            let edge = BoardEdge(from: from, to: to, linkBacked: real ? true : nil)
             board.edges.append(edge)
-            if let a = node(from), let b = node(to) { writeLink(from: a, to: b) }
+            if let a, let b { writeLink(from: a, to: b) }
             selection = []
             editingId = nil
             selectedEdge = edge.id
