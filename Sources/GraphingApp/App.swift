@@ -29,12 +29,14 @@ struct GraphingAppApp: App {
                 // ⌘Z / ⇧⌘Z must undo the *text field's* typing while a title (or card body) is being
                 // edited — not the board. The canvas key monitor already bails for a focused field; this
                 // menu command was the one board-undo path that wasn't first-responder-aware (the leak).
+                // No `.disabled` gate: field-focus isn't a SwiftUI-observable dependency, so a stale
+                // `.disabled` could swallow ⌘Z right when a field starts editing on an empty board. The
+                // routed closure is no-op-safe either way (field checks canUndo; performUndo/Redo guard
+                // an empty stack), so leaving the items always enabled is correct, not just lazy.
                 Button("Undo") { FieldEditor.undoIfEditing(else: model.performUndo) }
                     .keyboardShortcut("z", modifiers: .command)
-                    .disabled(!FieldEditor.isEditing && !model.canUndo)
                 Button("Redo") { FieldEditor.redoIfEditing(else: model.performRedo) }
                     .keyboardShortcut("z", modifiers: [.command, .shift])
-                    .disabled(!FieldEditor.isEditing && !model.canRedo)
             }
         }
     }
