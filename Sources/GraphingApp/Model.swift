@@ -1684,6 +1684,32 @@ final class AppModel: ObservableObject {
         select.insert(live.id)
     }
 
+    /// Duplicate a selection in place as real "copy" files, reusing the disk-aware copy path that
+    /// ⌘C/⌘V uses (`pasteCopyEntry` → `tCopy` duplicates each file/subtree and registers the inverse).
+    /// `offset` shifts the copies off the originals (⌘D nudges; ⌥-drag duplicates with zero offset and
+    /// the drag does the moving). Selects the new copies and returns their ids. One undoable transaction.
+    @discardableResult
+    func duplicate(_ ids: Set<UUID>, offset: CGSize = CGSize(width: 24, height: 24)) -> Set<UUID> {
+        guard let vault else { return [] }
+        let entries = clipboardEntries(from: ids)
+        guard !entries.isEmpty else { return [] }
+        func shifted(_ c: CGPoint) -> CGPoint {
+            CGPoint(x: AppModel.clampCoord(c.x + offset.width), y: AppModel.clampCoord(c.y + offset.height))
+        }
+        var newSelection = Set<UUID>()
+        transaction {
+            // A duplicate is a sibling, not a re-file: each copy stays in its original's folder.
+            for entry in entries {
+                pasteCopyEntry(entry, into: entry.node.parentRel, vault: vault, shift: shifted, select: &newSelection)
+            }
+        }
+        guard !newSelection.isEmpty else { return [] }
+        selection = newSelection
+        selectedEdge = nil
+        editingId = nil
+        return newSelection
+    }
+
     // MARK: Peek (inline file content)
 
     /// Open the content peek for a box (notes only — folders have no content).

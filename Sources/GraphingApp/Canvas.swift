@@ -92,6 +92,25 @@ struct CanvasView: View {
                         }
                     )
             )
+            .contextMenu { backgroundMenu }
+    }
+
+    /// Right-click on empty canvas: create / paste / select-all. (Box and connector menus live on
+    /// `NodeView`/`EdgeLine`.) New Note lands at the cursor's world point, matching double-click.
+    @ViewBuilder
+    private var backgroundMenu: some View {
+        Button("New Note") {
+            withAnimation(gappSpring) { _ = model.addNote(inDir: "", at: pastePoint()) }
+        }
+        if model.canPaste {
+            Button("Paste") { withAnimation(gappSpring) { model.paste(at: pastePoint()) } }
+        }
+        if !model.board.nodes.isEmpty {
+            Button("Select All") {
+                model.selection = Set(model.board.nodes.map { $0.id })
+                model.selectedEdge = nil
+            }
+        }
     }
 
     /// Drag on the empty canvas to rubber-band a selection (Shift adds to the current selection).
@@ -648,6 +667,8 @@ struct NodeView: View {
     let displayFrame: CGRect
     @State private var groupStart: [UUID: CGPoint] = [:]   // start centers of every box moving with this drag
     @State private var groupMultiSelect = false            // true == dragging a multi-selection (skip re-file)
+    @State private var dragIds: Set<UUID> = []             // boxes this drag moves (the duplicates on ⌥-drag)
+    @State private var dragRootId: UUID?                   // the dragged box (a duplicate's id on ⌥-drag)
     @State private var hovering = false
     @State private var cardText = ""        // expanded-card content (loaded lazily)
     @State private var cardDraft = ""       // expanded-card editor buffer
@@ -1001,10 +1022,22 @@ struct NodeView: View {
                     if !model.selection.contains(node.id) { model.selection = [node.id] }
                     model.editingId = nil
                     model.selectedEdge = nil
+                    // ⌥-drag duplicates in place first (its own undo step), then this gesture drags the
+                    // new copies — so the originals stay put and the duplicates follow the cursor. A
+                    // single-box ⌥-drag yields one copy, whose id becomes the re-file/settle root.
+                    let multiSelected = model.selection.count > 1
+                    if NSEvent.modifierFlags.contains(.option) {
+                        let copies = model.duplicate(model.selection, offset: .zero)
+                        dragIds = copies.flatMap { model.dragGroup(for: $0) }.reduce(into: Set()) { $0.insert($1) }
+                        dragRootId = multiSelected ? nil : copies.first
+                    } else {
+                        dragIds = model.dragGroup(for: node.id)
+                        dragRootId = node.id
+                    }
                     model.beginInteraction()
-                    groupMultiSelect = model.selection.count > 1
+                    groupMultiSelect = multiSelected
                     var dict: [UUID: CGPoint] = [:]
-                    for id in model.dragGroup(for: node.id) {
+                    for id in dragIds {
                         if let n = model.node(id) { dict[id] = n.center }
                     }
                     groupStart = dict
@@ -1015,16 +1048,19 @@ struct NodeView: View {
                     model.setPosition(id, to: CGPoint(x: c.x + dx, y: c.y + dy))
                 }
                 // Live drop-target highlight (single-box drags only; group moves never re-file).
-                model.dropTargetId = groupMultiSelect ? nil
-                    : model.dropTargetHighlight(for: node.id, at: model.worldFromGlobal(v.location))
+                model.dropTargetId = (groupMultiSelect ? nil : dragRootId)
+                    .map { model.dropTargetHighlight(for: $0, at: model.worldFromGlobal(v.location)) } ?? nil
             }
             .onEnded { v in
                 let multi = groupMultiSelect
+                let root = dragRootId
                 groupStart = [:]
                 groupMultiSelect = false
+                dragIds = []
+                dragRootId = nil
                 // Single-box drag re-files into the folder under the drop point; group moves reposition only.
-                if multi { model.endInteraction() }
-                else { model.endDrag(node.id, at: model.worldFromGlobal(v.location)) }
+                if multi || root == nil { model.endInteraction() }
+                else if let root { model.endDrag(root, at: model.worldFromGlobal(v.location)) }
             }
     }
 }
