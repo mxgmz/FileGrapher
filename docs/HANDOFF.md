@@ -5,10 +5,44 @@ open questions. At a session's start, read the top entry to pick up where we lef
 
 ---
 
-## ▶ NEXT SESSION — START HERE · S21 planned **Sprint 5 — Interaction Polish** (design + sprint, NO code yet)
+## ▶ NEXT SESSION — START HERE · S21 spawned **4 parallel lane-agents → 4 OPEN PRs** (review/merge train pending)
 
-S21 was a **planning session** (Max: brainstorm element interactions → polished product, then "just the
-sprint plan for now"). Deliverables, all docs:
+**State for next session: review + merge the 4 Sprint-5 PRs.** All authoring lanes are done and pushed as
+OPEN PRs against `main` (baseline `b26c289`); **none merged** — the serial review + merge train is the
+next-session job. Worktrees still exist under `.claude/worktrees/` (prune after merge).
+
+| Lane | PR | Branch | Tickets | Verify (headless) |
+|---|---|---|---|---|
+| **F — Folders** (keystone) | **#8** | `s5-folders` | T2 frame model · T5 collapse · T6 expandable folder-notes | pass (collapse/hidden/folder-note) |
+| **C — Collision & Pin** | **#7** | `s5-collision` | T4 push-on-drop + pin | 14/14 |
+| **H — Chrome & feel** | **#5** | `s5-chrome` | T1 hover/cursors · T3 handle scaling | (view-only) |
+| **E — Connectors** | **#6** | `s5-connectors` | T7 re-route + labels + hover | 14/14 |
+
+**Merge train order = F → C → H → E**, then spawn **Lane P (T8 polish)** from the integrated `main`. Each
+PR: inline `/code-review` → fix → `git merge-tree` vs advancing `main` → resolve hotspots → squash-merge →
+`./build-app.sh debug` + launch + **visual pass** (S19 UI-drive recipe). All four built clean / 0% CPU and
+each carries a "Needs visual verify" checklist in its PR body. Then reconcile docs (tick BACKLOG T1–T8).
+
+**⚠️ Known merge hotspots to reconcile (forked from baseline in parallel):**
+- **`Model.swift setExpanded`** — C adds the push-on-expand hook; F relaxes it to folders + `cardSize`.
+  Keep C's `resolveOverlaps` call, wrap F's folder/cardSize logic around it.
+- **`Canvas.swift NodeView.body` / drag gestures** — F splits folder drag (new `BoxGestures` modifier,
+  whole-box gestures on notes only); C adds a pinned early-out + lock cursor; H adds the hover overlay +
+  body cursor. Three-way, localized.
+- **Folder-header cursor** — H deferred the open-hand cursor on the *folder* header (lives in F's
+  `folderBox`); add it during the F+H reconcile. Also: C flagged a minor lock-cursor pop-leak (H's domain)
+  and group-drag-with-a-pinned-member (deferred).
+
+**Then S20-style cleanup owed:** 4 lane worktrees + remote branches (`s5-*`) prune after merge.
+
+---
+
+## 2026-06-23 — Session 21 — **planned Sprint 5 + orchestrated 4 lane-agents (PRs #5–#8)**
+
+S21 was a **planning + orchestration** session (Max: brainstorm element interactions → polished product →
+"just the sprint plan" → "plan multi-agent execution" → "Go"). Two halves:
+
+**(a) Planning deliverables, all docs:**
 - **New `docs/DESIGN-interaction-polish.md`** — the design note. **🔒 Locked: (1) Folder = frame**
   (header + border live, interior = marquee/drop, not a giant click target); **(2) nothing overlaps — a
   drop *pushes* siblings, a *pinned* box is an immovable anchor**; (3) folders are both collapsible (hide
@@ -27,8 +61,18 @@ its role with push, keeps it as the boxed-in fallback); folder frame-resize-with
 **`<FolderName>.md` inside** (Obsidian); folder-interior click **selects the folder**; chrome hides below
 **~0.5×** zoom. No forks remain — Sprint 5 is ready to build.
 
-**Next session:** start **T1** (hover + cursors, lowest risk) and **T2** (folder-as-frame, the keystone —
-highest hit-testing risk). No code written this session.
+**(b) Orchestration (the multi-agent execution):** wrote `docs/SPRINT5-orchestration.md` (4 conflict-domain
+**lanes** F/C/H/E + deferred polish P; shared brief; hotspot map; merge-train order), then ran Phase 0
+(committed/pushed the planning docs as baseline `b26c289`, build green) and **spawned all 4 authoring lanes
+as parallel background worktree agents**. Each produced **one OPEN PR, did NOT merge, touched NO docs, did
+NOT drive the UI** — exactly the contract. All four landed clean (PRs #5 H, #6 E, #7 C, #8 F). The two
+independent lanes (E, H) finished fastest/cleanest; the coupled keystone F and central C were the long poles
+— as the partition predicted. Shared checkout verified clean on `main` after a Lane-C branch-creation mishap
+it self-corrected. **Review/merge deferred to the next session (see the START-HERE table above).**
+
+**Lesson (reinforces S20):** partition by conflict-domain *lane* (fold a ticket's deps inside its lane),
+not one-agent-per-ticket, when tickets pile onto the same files. No-docs rule again eliminated the worst
+conflict class. Parallel saved authoring; review/merge stays serial.
 
 ---
 
