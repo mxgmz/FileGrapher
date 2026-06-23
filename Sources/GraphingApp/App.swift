@@ -33,6 +33,18 @@ struct GraphingAppApp: App {
                     .keyboardShortcut("z", modifiers: [.command, .shift])
                     .disabled(!model.canRedo)
             }
+            CommandGroup(after: .sidebar) {
+                // ⌘= shares a key with ⌘+ (+ is shift-=), so binding "=" makes ⌘+ work without Shift.
+                Button("Zoom In") { model.zoomIn() }
+                    .keyboardShortcut("=", modifiers: .command)
+                Button("Zoom Out") { model.zoomOut() }
+                    .keyboardShortcut("-", modifiers: .command)
+                Button("Actual Size") { model.resetZoom() }
+                    .keyboardShortcut("0", modifiers: .command)
+                Button("Zoom to Fit") { model.zoomToFit() }
+                    .keyboardShortcut("9", modifiers: .command)
+                Divider()
+            }
         }
     }
 }
@@ -168,18 +180,22 @@ struct TopBar: View {
 
             // Zoom controls
             HStack(spacing: 4) {
-                Button { zoomBy(1 / 1.2) } label: { Image(systemName: "minus.magnifyingglass") }
+                Button { model.zoomToFit() } label: { Image(systemName: "arrow.up.left.and.arrow.down.right") }
                     .buttonStyle(.borderless)
-                Text("\(Int(model.zoom * 100))%")
-                    .font(.system(.caption, design: .monospaced))
-                    .frame(width: 44)
-                Button { zoomBy(1.2) } label: { Image(systemName: "plus.magnifyingglass") }
+                    .help("Zoom to fit (⌘9)")
+                Button { model.zoomOut() } label: { Image(systemName: "minus.magnifyingglass") }
                     .buttonStyle(.borderless)
-                Button { model.zoom = 1; model.center(on: model.selection.first ?? model.board.nodes.first?.id ?? UUID()) } label: {
-                    Image(systemName: "scope")
+                    .help("Zoom out (⌘−)")
+                Button { model.resetZoom() } label: {
+                    Text("\(Int((model.zoom * 100).rounded()))%")
+                        .font(.system(.caption, design: .monospaced))
+                        .frame(width: 44)
                 }
                 .buttonStyle(.borderless)
-                .help("Reset zoom")
+                .help("Reset to 100% (⌘0)")
+                Button { model.zoomIn() } label: { Image(systemName: "plus.magnifyingglass") }
+                    .buttonStyle(.borderless)
+                    .help("Zoom in (⌘+)")
             }
 
             Button { showHistory.toggle() } label: {
@@ -217,13 +233,4 @@ struct TopBar: View {
 
     private func newNoteAtCenter() { model.addNote(inDir: "", at: centerWorld()) }
     private func newFolderAtCenter() { model.addFolder(inDir: "", at: centerWorld()) }
-
-    private func zoomBy(_ factor: CGFloat) {
-        let c = CGPoint(x: model.viewport.width / 2, y: model.viewport.height / 2)
-        let newZoom = max(0.2, min(4, model.zoom * factor))
-        // keep the viewport center anchored
-        model.pan = CGSize(width: c.x - (c.x - model.pan.width) * (newZoom / model.zoom),
-                           height: c.y - (c.y - model.pan.height) * (newZoom / model.zoom))
-        model.zoom = newZoom
-    }
 }

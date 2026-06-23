@@ -559,14 +559,79 @@ final class AppModel: ObservableObject {
                               y: global.y - canvasFrameGlobal.minY))
     }
 
+    /// Zoom limits. Scroll/pinch and the keyboard/menu zoom all clamp to this range so the canvas can
+    /// never zoom past the readable extremes (and pan stays reachable — see `panBound`'s 4× assumption).
+    static let minZoom: CGFloat = 0.2
+    static let maxZoom: CGFloat = 4
+    /// Multiplier per ⌘+ / ⌘− step (and the TopBar magnifier buttons).
+    static let zoomStep: CGFloat = 1.2
+
+    static func clampZoom(_ v: CGFloat) -> CGFloat { min(max(v, minZoom), maxZoom) }
+
     /// Zoom while keeping the world point under `screenPoint` fixed (cursor-anchored zoom).
     func zoomToward(_ screenPoint: CGPoint, factor: CGFloat) {
-        let newZoom = max(0.2, min(4, zoom * factor))
+        let newZoom = AppModel.clampZoom(zoom * factor)
         guard abs(newZoom - zoom) > .ulpOfOne else { return }
         let w = screenToWorld(screenPoint)
         zoom = newZoom
         pan = CGSize(width: screenPoint.x - w.x * newZoom,
                      height: screenPoint.y - w.y * newZoom)
+    }
+
+    /// Keyboard/menu/TopBar zoom: scale by `factor`, anchored on the viewport center (cursor-anchoring
+    /// is only for scroll/pinch, which have a natural focus point; a keystroke does not).
+    func zoomBy(_ factor: CGFloat) {
+        guard viewport != .zero else { return }
+        zoomToward(CGPoint(x: viewport.width / 2, y: viewport.height / 2), factor: factor)
+    }
+
+    func zoomIn() { zoomBy(AppModel.zoomStep) }
+    func zoomOut() { zoomBy(1 / AppModel.zoomStep) }
+
+    /// ⌘0 / click-the-percent: back to exactly 100%, re-centered on existing content (or world center).
+    func resetZoom() {
+        zoom = 1
+        recenterOnContent()
+    }
+
+    /// Pan so the average of all node centers sits at the viewport center, at the current zoom. Empty
+    /// board → the world origin used at first launch. Shared by `resetZoom` and the initial view.
+    private func recenterOnContent() {
+        guard viewport != .zero else { return }
+        let target: CGPoint
+        if board.nodes.isEmpty {
+            target = CGPoint(x: 10000, y: 10000)
+        } else {
+            let avgX = board.nodes.map { $0.x }.reduce(0, +) / Double(board.nodes.count)
+            let avgY = board.nodes.map { $0.y }.reduce(0, +) / Double(board.nodes.count)
+            target = CGPoint(x: avgX, y: avgY)
+        }
+        pan = CGSize(width: viewport.width / 2 - target.x * zoom,
+                     height: viewport.height / 2 - target.y * zoom)
+    }
+
+    /// World-space bounding box of everything on the board (each node's `effectiveFrame`, so a folder
+    /// counts at its grown size), or nil when the board is empty.
+    func boardBounds() -> CGRect? {
+        guard let first = board.nodes.first else { return nil }
+        var bounds = effectiveFrame(of: first)
+        for node in board.nodes.dropFirst() { bounds = bounds.union(effectiveFrame(of: node)) }
+        return bounds
+    }
+
+    /// Pan + zoom so every node fits on screen with a margin. Empty board → reset to 100% centered
+    /// (never divides by zero). The fit zoom is clamped to [`minZoom`, `maxZoom`].
+    func zoomToFit(padding: CGFloat = 80) {
+        guard viewport != .zero else { return }
+        guard let bounds = boardBounds(), bounds.width > 0, bounds.height > 0 else {
+            resetZoom(); return
+        }
+        let fitX = (viewport.width - 2 * padding) / bounds.width
+        let fitY = (viewport.height - 2 * padding) / bounds.height
+        zoom = AppModel.clampZoom(min(fitX, fitY))
+        let center = CGPoint(x: bounds.midX, y: bounds.midY)
+        pan = CGSize(width: viewport.width / 2 - center.x * zoom,
+                     height: viewport.height / 2 - center.y * zoom)
     }
 
     // MARK: Vault lifecycle
@@ -1915,16 +1980,7 @@ final class AppModel: ObservableObject {
     func initViewIfNeeded() {
         guard !didInitView, viewport != .zero else { return }
         didInitView = true
-        let target: CGPoint
-        if board.nodes.isEmpty {
-            target = CGPoint(x: 10000, y: 10000)
-        } else {
-            let avgX = board.nodes.map { $0.x }.reduce(0, +) / Double(board.nodes.count)
-            let avgY = board.nodes.map { $0.y }.reduce(0, +) / Double(board.nodes.count)
-            target = CGPoint(x: avgX, y: avgY)
-        }
-        pan = CGSize(width: viewport.width / 2 - target.x * zoom,
-                     height: viewport.height / 2 - target.y * zoom)
+        recenterOnContent()
     }
 
     // MARK: Reveal helpers
