@@ -102,9 +102,14 @@ struct BoardNode: Identifiable, Codable, Equatable {
     var fontScale: Double?       // title size multiplier; nil == 1.0
     var expanded: Bool?          // note shown as an in-place content card; nil/false == title-only
     var fileId: UInt64?          // disk inode — lets syncFromDisk follow a box to a file's new path
+    var pinned: Bool?            // anchored: can't be dragged, and collision push never moves it; nil/false == free
 
     /// True when this note is showing its content inline as a card.
     var isExpanded: Bool { (expanded ?? false) && kind == .note }
+
+    /// True when this box is anchored: it can't be dragged and the push solver treats it as an
+    /// immovable obstacle that siblings route around.
+    var isPinned: Bool { pinned ?? false }
 
     /// Resolved accent color (named palette entry, or the app accent as fallback).
     var accent: Color {
@@ -1225,6 +1230,85 @@ final class AppModel: ObservableObject {
         return nil
     }
 
+    /// Minimum-translation vector that pushes `mover` out of `obstacle` along the shorter axis of
+    /// their overlap — the smallest nudge that just separates two AABBs. Zero when they don't overlap.
+    static func separationVector(_ mover: CGRect, outOf obstacle: CGRect) -> CGSize {
+        guard mover.intersects(obstacle) else { return .zero }
+        let overlap = mover.intersection(obstacle)
+        if overlap.width <= overlap.height {
+            let dx = mover.midX < obstacle.midX ? -overlap.width : overlap.width
+            return CGSize(width: dx, height: 0)
+        }
+        let dy = mover.midY < obstacle.midY ? -overlap.height : overlap.height
+        return CGSize(width: 0, height: dy)
+    }
+
+    /// Settle the board after `movedId` was dropped/grown/resized: keep the moved box where it is and
+    /// **push overlapping siblings aside** (min-translation, cascading to their neighbors) until no two
+    /// siblings' `effectiveFrame`s intersect. SIBLINGS only (same `parentRel`) — a folder must contain
+    /// its own children, so parent↔child never "collides". A **pinned** sibling never moves: it's an
+    /// obstacle the push routes around. If the mover itself is boxed in by pinned siblings (can't stay
+    /// without overlapping one), fall back to `nearestFreeCenter` for the mover so we never deadlock.
+    /// All sibling moves run before the caller's `commit`, so they ride its single undo step.
+    func resolveOverlaps(movedId: UUID) {
+        guard let mover = node(movedId) else { return }
+        let moverFrame = effectiveFrame(of: mover)
+
+        // Deadlock guard: a pinned sibling can't be pushed, so if the mover overlaps one it must move
+        // itself. Snap it (and its subtree) to the nearest gap clear of ALL siblings, then stop.
+        let pinnedFrames = board.nodes
+            .filter { $0.parentRel == mover.parentRel && $0.id != movedId && $0.isPinned }
+            .map { effectiveFrame(of: $0) }
+        if pinnedFrames.contains(where: { $0.intersects(moverFrame) }) {
+            if let free = nearestFreeCenter(for: movedId, near: mover.center), free != mover.center {
+                moveSubtree(movedId, to: free)
+            }
+            return
+        }
+
+        // Working centers for every same-parent box; the mover is the fixed seed (never re-placed here).
+        let siblings = board.nodes.filter { $0.parentRel == mover.parentRel }
+        var center: [UUID: CGPoint] = Dictionary(uniqueKeysWithValues: siblings.map { ($0.id, $0.center) })
+        let baseFrame: [UUID: CGRect] = Dictionary(uniqueKeysWithValues: siblings.map { ($0.id, effectiveFrame(of: $0)) })
+        func frame(_ id: UUID) -> CGRect {
+            let base = baseFrame[id]!, c = center[id]!, n = node(id)!
+            return base.offsetBy(dx: c.x - n.center.x, dy: c.y - n.center.y)
+        }
+        let pushable = siblings.filter { $0.id != movedId && !$0.isPinned }.map { $0.id }
+
+        // Capped relaxation: each pass pushes every movable sibling out of its deepest current overlap.
+        // Bounded so the cascade (and folder auto-grow re-collisions) can never spin the CPU; a residual
+        // overlap is acceptable — far better than a hang.
+        for _ in 0..<24 {
+            var moved = false
+            for id in pushable {
+                let me = frame(id)
+                // Push out of whichever sibling we overlap most (the mover and pinned boxes included).
+                var worst: (CGRect, CGFloat) = (.null, 0)
+                for other in siblings where other.id != id {
+                    let f = frame(other.id)
+                    let area = me.intersection(f)
+                    let depth = min(area.width, area.height)
+                    if me.intersects(f), depth > worst.1 { worst = (f, depth) }
+                }
+                guard worst.1 > 0 else { continue }
+                let push = AppModel.separationVector(me, outOf: worst.0)
+                guard push != .zero else { continue }
+                center[id] = CGPoint(x: AppModel.clampCoord(center[id]!.x + push.width),
+                                     y: AppModel.clampCoord(center[id]!.y + push.height))
+                moved = true
+            }
+            if !moved { break }
+        }
+
+        // Commit the deltas: translate each pushed sibling (folders carry their whole subtree).
+        for id in pushable {
+            let delta = CGSize(width: center[id]!.x - node(id)!.center.x,
+                               height: center[id]!.y - node(id)!.center.y)
+            if abs(delta.width) > 0.5 || abs(delta.height) > 0.5 { moveSubtree(id, to: center[id]!) }
+        }
+    }
+
     /// Boxes whose parent folder is exactly `relPath` (one level down).
     func directChildren(of relPath: String) -> [BoardNode] {
         board.nodes.filter { $0.parentRel == relPath }
@@ -1467,6 +1551,15 @@ final class AppModel: ObservableObject {
         commit(before: before, fileUndo: [], fileRedo: [])
     }
 
+    /// End a corner-resize: a box grown on resize can now overlap siblings, so push them aside before
+    /// committing — the push rides this resize's single undo step (same as the drop case).
+    func endResize(_ id: UUID) {
+        guard let before = interactionBefore else { return }
+        interactionBefore = nil
+        resolveOverlaps(movedId: id)
+        commit(before: before, fileUndo: [], fileRedo: [])
+    }
+
     /// End a node drag: re-file into a folder if dropped inside one. Records the
     /// reposition AND any disk move as a single undo step.
     func endDrag(_ id: UUID, at dropPoint: CGPoint) {
@@ -1506,22 +1599,11 @@ final class AppModel: ObservableObject {
             relocate(to: "")
         }
 
-        // Settle on drop: if the box landed overlapping a sibling, slide it (and, for a folder, its
-        // whole subtree) to the nearest free spot. Runs after any re-file so siblings are measured in
-        // the box's final folder; the nudge rides this drag's single undo step. Only new drops settle
-        // — existing overlaps on load are left untouched.
-        let landed = board.nodes[idx].center
-        if let free = nearestFreeCenter(for: id, near: landed), free != landed {
-            let dx = free.x - landed.x, dy = free.y - landed.y
-            board.nodes[idx].center = CGPoint(x: AppModel.clampCoord(free.x), y: AppModel.clampCoord(free.y))
-            if current.kind == .folder {
-                let prefix = board.nodes[idx].relPath + "/"
-                for di in board.nodes.indices where board.nodes[di].relPath.hasPrefix(prefix) {
-                    board.nodes[di].center = CGPoint(x: AppModel.clampCoord(board.nodes[di].center.x + dx),
-                                                     y: AppModel.clampCoord(board.nodes[di].center.y + dy))
-                }
-            }
-        }
+        // Settle on drop: keep the box where the user let go and PUSH overlapped siblings aside (pinned
+        // ones stay put; the mover snaps to a gap only if it's boxed in by pinned siblings). Runs after
+        // any re-file so siblings are measured in the box's final folder; the whole push rides this
+        // drag's single undo step. Only new drops settle — existing overlaps on load are left untouched.
+        resolveOverlaps(movedId: id)
 
         commit(before: before, fileUndo: fU, fileRedo: fR)
     }
@@ -1849,6 +1931,8 @@ final class AppModel: ObservableObject {
                 board.nodes[idx].width = gappDefaultNoteSize.width
                 board.nodes[idx].height = gappDefaultNoteSize.height
             }
+            // A bigger card can now overlap its neighbors — push them aside (rides this same step).
+            if on { resolveOverlaps(movedId: id) }
         }
     }
     func toggleExpand(_ id: UUID) {
@@ -1953,6 +2037,23 @@ final class AppModel: ObservableObject {
                 board.nodes[idx].colorName = color?.rawValue
             }
         }
+    }
+
+    /// Pin or unpin one or more boxes. A pinned box can't be dragged and the push solver never moves
+    /// it (it's an obstacle others route around). Undoable. `pinned` is stored as nil when false so old
+    /// board.json round-trips byte-compatibly.
+    func setPinned(_ ids: Set<UUID>, _ on: Bool) {
+        guard !ids.isEmpty else { return }
+        transaction {
+            for id in ids where board.nodes.contains(where: { $0.id == id }) {
+                let idx = board.nodes.firstIndex { $0.id == id }!
+                board.nodes[idx].pinned = on ? true : nil
+            }
+        }
+    }
+    func togglePinned(_ ids: Set<UUID>) {
+        guard let first = ids.first, let n = node(first) else { return }
+        setPinned(ids, !n.isPinned)
     }
 
     /// Set the title text size of one or more boxes. Undoable.
