@@ -20,13 +20,26 @@ as **relative to the parent folder**; derive absolute through ONE chokepoint (`w
 every node). Kills the coordinate-meltdown class + makes folders portable. **This is inherently serial** (it owns
 Model.swift's coordinate core) — do it as one focused lane, NOT parallel.
 
-**Owe one visual eyeball** (carried from S26, render-only — logic proven headless 8/8):
-> ⚠️ **Edge promotion:** collapse two folders that link across each other → expect **one weighted folder↔folder
-> connector** (count badge if >1 link); links wholly inside one collapsed folder vanish; a note→collapsed-folder
-> link becomes a note→folder connector. recordentaln8n has the structure — collapse its top-level folders.
-> **Also eyeball** the two render-touching S26 changes: `canvas_screenshot` now shows the agent's `canvas_color`
-> coding (CART), and the T8 visual family (note/folder/card/ghost share radius 12, ring weights, shadows — POLISH;
-> see PR #11 "what to eyeball" list). Use the S19 UI-drive recipe.
+**✅ Visual pass DONE (S26, end of session)** — drove the UI on a throwaway fixture (`/tmp/gapp-promote`: two
+collapsed cross-linked folders + colored note + expanded card) and confirmed all three S26 render changes:
+- **Edge promotion (#9):** collapsed **Frontend → "3" → Backend** — the 3 cross-folder links aggregated into ONE
+  weighted connector, direction preserved, the internal App→Router link correctly hidden. ✅
+- **Color render (#10):** MCP `canvas_screenshot` shows Frontend (blue wash) / Backend (green) / README (orange
+  tint) — the agent's color-coding now surfaces. ✅
+- **T8 family (#11):** note/folder/card share radius/ring/shadow; chrome shows at 57% (>0.5× T3 gate). ✅
+
+> **Screenshot recipe that worked (the focus war is solved):** the app's window OWNER is **"Graphing App"** (with
+> the space — bundle display name), NOT "GraphingApp". Get its CGWindowID via a tiny `CGWindowListCopyWindowInfo`
+> Swift helper (`scratchpad/winid.swift`, metadata-only → no screen-recording permission), then
+> `screencapture -x -l<id> -o out.png` captures that window **regardless of z-order** — no need to hide the host
+> terminal at all. Full-screen `screencapture` still grabs whoever's on top, so use `-l<id>`.
+
+**Two minor follow-ups noticed during the pass (NON-blocking, NOT caused by the 3 PRs):**
+- Collapsed folder header **truncates/wraps the name** ("Fronten d") when the "N items" badge crowds the 220px
+  collapsed width — cosmetic; widen or ellipsize. *(filed in BACKLOG known-issues.)*
+- One-time **collapse→open drift** + child notes resized to 360×320 on the fixture's initial load (did NOT
+  reproduce; a manual `canvas_collapse` sticks). Likely a load-settling/fixture quirk — all three S26 PRs are
+  render-only/cosmetic and cannot mutate collapse state or note size, so it's not a regression from this work.
 
 ---
 

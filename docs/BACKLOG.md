@@ -477,6 +477,8 @@ strength. User explicitly requested: **editable connectors**, **editable text si
 ---
 
 ## 🐞 Known issues
+- ⬜ *(noticed S26 visual pass)* A **collapsed folder header truncates/wraps its name** ("Fronten d") when the
+  "N items" badge crowds the ~220px collapsed width — cosmetic; widen the collapsed strip or ellipsize the title.
 - ✅ *(fixed S20, PR #1)* ⌘Z while editing a box title now undoes the text field, not the board.
 - Auto-grow folder stretches to reach a child flung far away (by design; can surprise).
 - Scroll-pan direction & input-monitor gating only verified on the dev machine.
