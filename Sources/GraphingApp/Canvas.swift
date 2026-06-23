@@ -8,6 +8,21 @@ let gappSpring = Animation.spring(response: 0.30, dampingFraction: 0.78)
 /// (drawn by `NodeView`) stays so the box still reads as selected. (DESIGN §8, locked 2026-06-23.)
 let gappChromeMinZoom: CGFloat = 0.5
 
+/// Shared visual vocabulary for the box family — note, folder, expanded card, time-travel ghost — so
+/// they read as one system (T8). Every box rounds, rings, and casts a shadow on these values; multiply
+/// by the node's `scale` (= zoom) at the call site, since boxes render in screen space (see Coordinates).
+enum GappStyle {
+    static let cornerRadius: CGFloat = 12      // every box corner — notes, cards, folders, ghosts
+    static let borderWidth: CGFloat = 1        // resting ring (a plain, default-colored box)
+    static let coloredBorderWidth: CGFloat = 1.5  // resting ring when the box carries a custom color
+    static let selectedBorderWidth: CGFloat = 2.5  // ring of the selected box
+    static let dashedStroke: [CGFloat] = [6, 4]    // unselected folder + history-ghost dashes
+    static let shadowOpacity: Double = 0.12        // box drop-shadow tint
+    static let shadowRadius: CGFloat = 4           // resting drop-shadow blur
+    static let selectedShadowRadius: CGFloat = 7   // lifted drop-shadow blur when selected
+    static let shadowOffsetY: CGFloat = 2          // drop-shadow downward offset
+}
+
 struct CanvasView: View {
     @EnvironmentObject var model: AppModel
 
@@ -454,7 +469,7 @@ struct CanvasView: View {
                 if let t = pc.hoverTarget, let tn = model.node(t) {
                     let tf = model.effectiveFrame(of: tn)
                     let c = model.worldToScreen(CGPoint(x: tf.midX, y: tf.midY))
-                    RoundedRectangle(cornerRadius: 12)
+                    RoundedRectangle(cornerRadius: GappStyle.cornerRadius * model.zoom)
                         .stroke(Color.accentColor, lineWidth: 3)
                         .frame(width: tf.width * model.zoom, height: tf.height * model.zoom)
                         .position(c)
@@ -469,7 +484,7 @@ struct CanvasView: View {
     private var dropTargetOutline: some View {
         if let id = model.dropTargetId, let folder = model.node(id) {
             let f = model.effectiveFrame(of: folder)
-            RoundedRectangle(cornerRadius: 12)
+            RoundedRectangle(cornerRadius: GappStyle.cornerRadius * model.zoom)
                 .stroke(Color.accentColor, style: StrokeStyle(lineWidth: 3, dash: [7, 4]))
                 .frame(width: f.width * model.zoom, height: f.height * model.zoom)
                 .position(model.worldToScreen(CGPoint(x: f.midX, y: f.midY)))
@@ -593,10 +608,11 @@ private struct HistoryGhostBox: View {
         .padding(.horizontal, 10 * scale)
         .frame(width: ghost.size.width * scale, height: ghost.size.height * scale, alignment: .leading)
         .foregroundStyle(.secondary)
-        .background(RoundedRectangle(cornerRadius: 10 * scale)
+        .background(RoundedRectangle(cornerRadius: GappStyle.cornerRadius * scale)
             .fill(Color(nsColor: .windowBackgroundColor).opacity(0.5)))
-        .overlay(RoundedRectangle(cornerRadius: 10 * scale)
-            .stroke(style: StrokeStyle(lineWidth: 1.5 * scale, dash: [5 * scale, 4 * scale]))
+        .overlay(RoundedRectangle(cornerRadius: GappStyle.cornerRadius * scale)
+            .stroke(style: StrokeStyle(lineWidth: GappStyle.coloredBorderWidth * scale,
+                                       dash: GappStyle.dashedStroke.map { $0 * scale }))
             .foregroundStyle(.secondary.opacity(0.6)))
         .opacity(0.6)
         .allowsHitTesting(false)
@@ -782,7 +798,7 @@ struct EdgeLine: View {
                 .allowsHitTesting(false)
             if let dropTarget, let targetNode = model.node(dropTarget) {
                 let f = model.effectiveFrame(of: targetNode)
-                RoundedRectangle(cornerRadius: 12)
+                RoundedRectangle(cornerRadius: GappStyle.cornerRadius * model.zoom)
                     .stroke(edge.color, lineWidth: 3)
                     .frame(width: f.width * model.zoom, height: f.height * model.zoom)
                     .position(model.worldToScreen(CGPoint(x: f.midX, y: f.midY)))
@@ -899,8 +915,9 @@ struct NodeView: View {
             .opacity(model.cutIds.contains(node.id) ? 0.45 : (isHistoryGhost ? 0.3 : 1))   // cut source / added-later ghost
             .overlay {   // added-later: a dashed outline marks "not in this version yet"
                 if isHistoryGhost {
-                    RoundedRectangle(cornerRadius: 10 * scale)
-                        .stroke(style: StrokeStyle(lineWidth: 1.5 * scale, dash: [5 * scale, 4 * scale]))
+                    RoundedRectangle(cornerRadius: GappStyle.cornerRadius * scale)
+                        .stroke(style: StrokeStyle(lineWidth: GappStyle.coloredBorderWidth * scale,
+                                                   dash: GappStyle.dashedStroke.map { $0 * scale }))
                         .foregroundStyle(.secondary.opacity(0.7))
                 }
             }
@@ -927,9 +944,8 @@ struct NodeView: View {
     @ViewBuilder
     private var hoverOutline: some View {
         if hovering && !isSelected && !isEditing {
-            let radius = (node.kind == .folder ? 14 : 12) * scale
-            RoundedRectangle(cornerRadius: radius)
-                .stroke(node.accent.opacity(0.45), lineWidth: 1.5 * scale)
+            RoundedRectangle(cornerRadius: GappStyle.cornerRadius * scale)
+                .stroke(node.accent.opacity(0.45), lineWidth: GappStyle.coloredBorderWidth * scale)
                 .allowsHitTesting(false)
         }
     }
@@ -980,13 +996,13 @@ struct NodeView: View {
             cardBody
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .background(RoundedRectangle(cornerRadius: 12 * scale).fill(Color(nsColor: .controlBackgroundColor)))
-        .clipShape(RoundedRectangle(cornerRadius: 12 * scale))
+        .background(RoundedRectangle(cornerRadius: GappStyle.cornerRadius * scale).fill(Color(nsColor: .controlBackgroundColor)))
+        .clipShape(RoundedRectangle(cornerRadius: GappStyle.cornerRadius * scale))
         .overlay(
-            RoundedRectangle(cornerRadius: 12 * scale)
-                .stroke(noteBorderColor, lineWidth: (isSelected ? 2.5 : (hasCustomColor ? 1.5 : 1)) * scale)
+            RoundedRectangle(cornerRadius: GappStyle.cornerRadius * scale)
+                .stroke(noteBorderColor, lineWidth: boxBorderWidth * scale)
         )
-        .shadow(color: .black.opacity(0.12), radius: (isSelected ? 7 : 4) * scale, y: 2 * scale)
+        .shadow(color: .black.opacity(GappStyle.shadowOpacity), radius: boxShadowRadius * scale, y: GappStyle.shadowOffsetY * scale)
         .onAppear { cardText = model.fileText(node.id); cardDraft = cardText }
         .onChange(of: model.diskRevision) { _, _ in
             // A watched file changed (our own link-write or an external edit). Re-read — but never
@@ -1163,13 +1179,13 @@ struct NodeView: View {
         .padding(10 * scale)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(
-            RoundedRectangle(cornerRadius: 12 * scale)
+            RoundedRectangle(cornerRadius: GappStyle.cornerRadius * scale)
                 .fill(Color(nsColor: .controlBackgroundColor))
-                .shadow(color: .black.opacity(0.12), radius: (isSelected ? 7 : 4) * scale, y: 2 * scale)
+                .shadow(color: .black.opacity(GappStyle.shadowOpacity), radius: boxShadowRadius * scale, y: GappStyle.shadowOffsetY * scale)
         )
         .overlay(
-            RoundedRectangle(cornerRadius: 12 * scale)
-                .stroke(noteBorderColor, lineWidth: (isSelected ? 2.5 : (hasCustomColor ? 1.5 : 1)) * scale)
+            RoundedRectangle(cornerRadius: GappStyle.cornerRadius * scale)
+                .stroke(noteBorderColor, lineWidth: boxBorderWidth * scale)
         )
     }
 
@@ -1178,6 +1194,16 @@ struct NodeView: View {
         return hasCustomColor ? node.accent.opacity(0.55) : Color.black.opacity(0.08)
     }
 
+    /// Ring width shared by the note box and the expanded card: thick when selected, a touch heavier
+    /// when the box carries a custom color so its tint reads, otherwise the hairline resting ring.
+    private var boxBorderWidth: CGFloat {
+        if isSelected { return GappStyle.selectedBorderWidth }
+        return hasCustomColor ? GappStyle.coloredBorderWidth : GappStyle.borderWidth
+    }
+
+    /// Drop-shadow blur for the note box and the expanded card — lifts when selected.
+    private var boxShadowRadius: CGFloat { isSelected ? GappStyle.selectedShadowRadius : GappStyle.shadowRadius }
+
     // Folder box (a frame/container): header = move/rename, interior = marquee its children / new note.
     private var folderBox: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -1185,13 +1211,13 @@ struct NodeView: View {
             if !node.isCollapsedFolder { folderInterior }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .background(RoundedRectangle(cornerRadius: 14 * scale).fill(node.accent.opacity(0.045)))
-        .clipShape(RoundedRectangle(cornerRadius: 14 * scale))
+        .background(RoundedRectangle(cornerRadius: GappStyle.cornerRadius * scale).fill(node.accent.opacity(0.045)))
+        .clipShape(RoundedRectangle(cornerRadius: GappStyle.cornerRadius * scale))
         .overlay(
-            RoundedRectangle(cornerRadius: 14 * scale)
+            RoundedRectangle(cornerRadius: GappStyle.cornerRadius * scale)
                 .stroke(isSelected ? node.accent : node.accent.opacity(0.4),
-                        style: StrokeStyle(lineWidth: (isSelected ? 2.5 : 1.5) * scale,
-                                           dash: isSelected ? [] : [6 * scale, 4 * scale]))
+                        style: StrokeStyle(lineWidth: (isSelected ? GappStyle.selectedBorderWidth : GappStyle.coloredBorderWidth) * scale,
+                                           dash: isSelected ? [] : GappStyle.dashedStroke.map { $0 * scale }))
         )
     }
 
