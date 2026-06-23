@@ -210,6 +210,16 @@ struct BoardEdge: Identifiable, Codable, Equatable {
     }
 }
 
+/// A folder-level connector synthesized by edge promotion (SPEC-folder-canvas.md §4): when an endpoint
+/// is hidden inside a collapsed folder it is re-anchored to that folder, and parallel links collapse into
+/// one connector whose `weight` is how many real links it stands in for. Render-only — never on disk.
+struct PromotedEdge: Identifiable {
+    let from: UUID
+    let to: UUID
+    let weight: Int
+    var id: String { "\(from)->\(to)" }
+}
+
 struct BoardData: Codable {
     var nodes: [BoardNode] = []
     var edges: [BoardEdge] = []
@@ -1488,6 +1498,43 @@ final class AppModel: ObservableObject {
     /// Number of boxes living anywhere inside a folder (for the collapsed "N items" badge).
     func descendantCount(of node: BoardNode) -> Int {
         board.nodes.filter { $0.relPath.hasPrefix(node.relPath + "/") }.count
+    }
+
+    /// Folder-level connectors for the collapsed view (SPEC-folder-canvas.md §4). Pure over the board's
+    /// `collapsed` flags: re-anchor each edge endpoint to its outermost collapsed ancestor, drop links
+    /// internal to one collapsed folder, and merge parallels into one weighted connector. Returns ONLY the
+    /// synthesized edges (≥1 endpoint promoted) — edges among fully visible boxes keep their real
+    /// interactive connectors, drawn elsewhere.
+    /// ponytail: recomputed per render; memoize per collapse-state only if a huge edge count bites (§7).
+    var promotedEdges: [PromotedEdge] { AppModel.promotedEdges(nodes: board.nodes, edges: board.edges) }
+
+    static func promotedEdges(nodes: [BoardNode], edges: [BoardEdge]) -> [PromotedEdge] {
+        // Outermost first: a node's visible stand-in is its shallowest collapsed ancestor (the only one not
+        // itself hidden); a deeper collapsed folder nested inside it never surfaces.
+        let collapsedFolders = nodes.filter { $0.isCollapsedFolder }.sorted { $0.relPath.count < $1.relPath.count }
+        guard !collapsedFolders.isEmpty else { return [] }
+        let byId = Dictionary(nodes.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        func representative(_ id: UUID) -> UUID? {
+            guard let node = byId[id] else { return nil }
+            return collapsedFolders.first { node.relPath.hasPrefix($0.relPath + "/") }?.id ?? id
+        }
+
+        var weights: [String: PromotedEdge] = [:]
+        var order: [String] = []
+        for edge in edges {
+            guard let from = representative(edge.from), let to = representative(edge.to),
+                  from != to,                                  // internal to one collapsed folder → drop
+                  from != edge.from || to != edge.to          // neither endpoint moved → a real edge, drawn as-is
+            else { continue }
+            let key = "\(from)->\(to)"
+            if let merged = weights[key] {
+                weights[key] = PromotedEdge(from: from, to: to, weight: merged.weight + 1)
+            } else {
+                weights[key] = PromotedEdge(from: from, to: to, weight: 1)
+                order.append(key)
+            }
+        }
+        return order.map { weights[$0]! }
     }
 
     /// Collapse / expand a folder (hide or show its descendants). Undoable.

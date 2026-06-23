@@ -27,6 +27,7 @@ struct CanvasView: View {
                 background
                 grid.allowsHitTesting(false)
                 interactiveEdges
+                promotedEdgeLayer
                 world
                 historyGhostLayer
                 dropTargetOutline
@@ -376,6 +377,20 @@ struct CanvasView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
+    /// Folder-level connectors when folders are collapsed (SPEC-folder-canvas.md §4). Render-only: each
+    /// stands in for ≥1 link whose endpoint is hidden inside a collapsed folder, drawn thicker + count-
+    /// badged the more links it aggregates. Edges among visible boxes stay in `interactiveEdges`.
+    private var promotedEdgeLayer: some View {
+        ZStack {
+            ForEach(model.promotedEdges) { promoted in
+                if let g = edgeGeometry(BoardEdge(from: promoted.from, to: promoted.to)) {
+                    PromotedEdgeLine(p1: g.0, c1: g.1, c2: g.2, p2: g.3, weight: promoted.weight)
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
     // MARK: World — folders first so notes render above them
 
     // Shallower folders first so a nested folder renders on top of its parent.
@@ -600,6 +615,39 @@ private struct GhostEdgeLine: View {
             path.stroke(Color.secondary.opacity(0.3),
                         style: StrokeStyle(lineWidth: 2, lineCap: .round, dash: [5, 4]))
             gappArrowhead(tip: p2, from: c2).fill(Color.secondary.opacity(0.3))
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .allowsHitTesting(false)
+    }
+}
+
+/// A promoted folder-level connector (SPEC-folder-canvas.md §4). Thickens with the number of real links
+/// it aggregates and carries a count badge for >1. Render-only, never hit-tested.
+private struct PromotedEdgeLine: View {
+    let p1, c1, c2, p2: CGPoint
+    let weight: Int
+    private var path: Path {
+        var p = Path(); p.move(to: p1); p.addCurve(to: p2, control1: c1, control2: c2); return p
+    }
+    // Cubic-Bezier midpoint (t=0.5), where the count badge reads cleanly.
+    private var mid: CGPoint {
+        CGPoint(x: 0.125 * p1.x + 0.375 * c1.x + 0.375 * c2.x + 0.125 * p2.x,
+                y: 0.125 * p1.y + 0.375 * c1.y + 0.375 * c2.y + 0.125 * p2.y)
+    }
+    var body: some View {
+        ZStack {
+            path.stroke(Color.secondary.opacity(0.7),
+                        style: StrokeStyle(lineWidth: min(2 + CGFloat(weight - 1), 7), lineCap: .round))
+            gappArrowhead(tip: p2, from: c2).fill(Color.secondary.opacity(0.7))
+            if weight > 1 {
+                Text("\(weight)")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(Color.secondary)
+                    .padding(.horizontal, 5).padding(.vertical, 1)
+                    .background(Capsule().fill(Color(nsColor: .windowBackgroundColor)))
+                    .overlay(Capsule().stroke(Color.secondary.opacity(0.4)))
+                    .position(mid)
+            }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .allowsHitTesting(false)
