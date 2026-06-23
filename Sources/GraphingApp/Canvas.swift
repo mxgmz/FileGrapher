@@ -715,9 +715,26 @@ struct NodeView: View {
                                   onDoubleTap: { handleDoubleTap(at: $0) },
                                   onTap: { select() }))
             .contextMenu { menu }
-            .onHover { hovering = $0 }
+            .overlay(alignment: .topLeading) { if node.isPinned { pinGlyph } }
+            .onHover { inside in
+                hovering = inside
+                // A pinned box can't be dragged — show the lock cursor while the pointer is over it.
+                if node.isPinned { if inside { NSCursor.operationNotAllowed.push() } else { NSCursor.pop() } }
+            }
             .animation(.easeInOut(duration: 0.12), value: isSelected)
             .animation(.easeInOut(duration: 0.12), value: hovering)
+    }
+
+    /// Small lock badge marking a pinned (anchored) box.
+    private var pinGlyph: some View {
+        Image(systemName: "pin.fill")
+            .font(.system(size: 9 * scale, weight: .bold))
+            .foregroundStyle(node.accent)
+            .padding(4 * scale)
+            .background(.ultraThinMaterial, in: Circle())
+            .overlay(Circle().stroke(node.accent.opacity(0.35), lineWidth: 1))
+            .padding(6 * scale)
+            .help("Pinned — drag is disabled")
     }
 
     /// Hover affordance: a small button that expands the note into an in-place content card.
@@ -1143,6 +1160,10 @@ struct NodeView: View {
             }
         }
         Divider()
+        Button(node.isPinned ? "Unpin" : "Pin") {
+            withAnimation(gappSpring) { model.setPinned(menuTargets, !node.isPinned) }
+        }
+        Divider()
         Button("Reveal in Finder") { model.revealInFinder(node.id) }
         if node.kind == .note {
             Button("Open in Default App") { model.openInDefaultApp(node.id) }
@@ -1183,6 +1204,9 @@ struct NodeView: View {
     private var dragGesture: some Gesture {
         DragGesture(minimumDistance: 3, coordinateSpace: .global)
             .onChanged { v in
+                // A pinned box is an anchor: drag is a no-op (just select it). It still acts as an
+                // obstacle other boxes push around.
+                if node.isPinned { if !model.selection.contains(node.id) { model.selection = [node.id] }; return }
                 if groupStart.isEmpty {
                     // Dragging a box that isn't selected collapses the selection to just it; dragging
                     // one that's part of a multi-selection moves the whole group.
@@ -1338,7 +1362,7 @@ struct ResizeHandle: View {
                         let minSize = node.kind == .folder ? AppModel.folderMinSize : AppModel.noteMinSize
                         model.setFrame(node.id, model.resizedFrame(for: node, anchor: anchor, drag: drag, sign: sign, minSize: minSize))
                     }
-                    .onEnded { _ in startFrame = nil; model.endInteraction() }
+                    .onEnded { _ in startFrame = nil; model.endResize(node.id) }
             )
     }
 }
