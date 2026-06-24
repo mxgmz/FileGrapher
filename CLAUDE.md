@@ -43,12 +43,20 @@ Also: `build-app.sh` (assembles + ad-hoc-signs `dist/GraphingApp.app`), `Package
 - **Source of truth = disk.** `board.json` (at `<vault>/.graphingapp/board.json`) stores only
   *layout* — positions, sizes, edges. `AppModel.syncFromDisk()` reconciles the board with the real
   files/folders (adds boxes for things created in Obsidian, drops boxes whose files vanished).
-- **Coordinates.** A node's `x,y` is the box **center** in world space. `worldToScreen` /
-  `screenToWorld` apply `pan` (CGSize) and `zoom`. The canvas draws in *screen* space: each node is
-  `.position(worldToScreen(center))` and `NodeView` renders **every dimension × zoom** (frame, fonts,
-  padding, radii, strokes via its `scale` property). ⚠️ **Never use `.scaleEffect(zoom)` on a node** —
-  that bitmap-scales the rendered view, so text turns blurry when zoomed/enlarged. Render in screen
-  space so glyphs are re-rasterized crisp. Tap coords inside a node are in scaled space → ÷ `scale`.
+- **Coordinates (relative since Folder-Canvas Phase 1, board.json v2).** A node's `x,y` is its center
+  **relative to its parent folder's center** (root nodes are relative to the world origin, so their value
+  is unchanged). **Absolute position is derived** through one chokepoint — `AppModel.worldCenter(of:)`
+  (sums the ancestor chain) / `worldFrame(of:)` — and `effectiveFrame` is built on `worldFrame`, so render,
+  hit-test, bounds, and marquee are all world-correct without touching their call sites. ⚠️ **Outside the
+  derivation funcs + write paths, never treat `node.x,y` / `node.center` / `node.frame` as world** — they're
+  parent-relative; ask `worldCenter(of:)`. Writes: drags are a pure translation (relative delta = world
+  delta, no conversion); creating or re-parenting converts via `relativeCenter(_:inDir:)` (world→relative);
+  a v1→v2 `migrateToRelativeIfNeeded()` runs once on load (lossless — `Tests/RelativeCoordTests.swift`).
+  `worldToScreen`/`screenToWorld` still apply `pan` + `zoom` to a **world** point. The canvas draws in
+  *screen* space: `.position(worldToScreen(effectiveFrame.mid))`, and `NodeView` renders **every dimension ×
+  zoom** (frame, fonts, padding, radii, strokes via `scale`). ⚠️ **Never `.scaleEffect(zoom)` a node** — it
+  bitmap-scales the view, blurring text; render in screen space so glyphs re-rasterize crisp. Tap coords
+  inside a node are in scaled space → ÷ `scale`.
 - **Folder auto-grow.** `AppModel.effectiveFrame(of:)` = a folder's stored frame **unioned** with
   (its children's bounds + padding + header). Used everywhere a folder's box matters (render,
   hit-test, edge anchoring, handles). A folder never shrinks below its contents.

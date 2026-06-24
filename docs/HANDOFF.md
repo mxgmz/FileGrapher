@@ -5,20 +5,50 @@ open questions. At a session's start, read the top entry to pick up where we lef
 
 ---
 
-## ▶ NEXT SESSION — START HERE · S27 — **Next big rock: Folder-Canvas Phase 1 (relative-coord migration).**
+## ▶ NEXT SESSION — START HERE · S28 — **Phase 1 (relative coords) landed. Next: Phase 2 (folder-as-card).**
 
-S26 ran a **parallel-PR merge train** (the S20/S21 recipe): committed the long-uncommitted S23–25 work as a
-baseline, then shipped **3 PRs** — edge promotion + two cartographer cleanups + T8 polish — all merged to `main`.
-**main @ `1a641c2`, integration build clean, app 0.0% CPU, all 3 headless suites pass.** The small post-Sprint-5
-items are now done; what remains is the big structural one.
+S27 shipped **Folder-Canvas Phase 1 — the relative-coordinate migration** (PR #12, merged) — the scary
+structural one, done invisibly + behavior-preserving and **verified lossless on the real 222-node board**.
+**main @ `88c569e` (+ this doc commit), build clean, all 4 headless suites pass.** The coordinate foundation
+is in place; the cartographer/folder epics can build on it.
 
-**▶ NEXT BUILD: Folder-Canvas Phase 1 — relative-coord migration (`SPEC-folder-canvas.md` §0–3, §5).**
-The scary phase, made boring: *invisible / behavior-preserving first*. board.json v1→v2; reinterpret `BoardNode.x,y`
-as **relative to the parent folder**; derive absolute through ONE chokepoint (`worldCenter`/`effectiveFrame`) so the
-~115 position-readers don't change; keep auto-grow temporarily so it renders pixel-identical. Audit the write paths
-(§5). Gate it with a **headless round-trip test** (migrate a fixture → assert `worldCenter == originalGlobal` for
-every node). Kills the coordinate-meltdown class + makes folders portable. **This is inherently serial** (it owns
-Model.swift's coordinate core) — do it as one focused lane, NOT parallel.
+**What shipped (S27):** `BoardNode.x,y` is now **center relative to the parent folder** (root unchanged);
+absolute derived through `worldCenter`/`worldFrame`, with `effectiveFrame` re-pointed onto it so render /
+hit-test / bounds / marquee are world-correct without touching the ~115 call sites. One-time lossless `v1→v2`
+`migrateToRelativeIfNeeded` (snapshot-based); creates/re-parents convert via `relativeCenter`; drags invariant;
+`moveSubtree` prefix-shifting gone; `reinInStrandedChildren` fixed for relative space (dropped a v1-global
+re-anchor that yanked deep folders to (0,0)). Auto-grow kept → pixel-identical. **CLAUDE.md "Coordinates"
+updated.** Gate: `Tests/RelativeCoordTests.swift` 13/13; live-verified on a fixture + the real recordentaln8n board.
+
+> 🔑 **The mental model changed — read CLAUDE.md "Coordinates".** Outside the derivation funcs + write paths,
+> NEVER treat `node.x,y`/`.center`/`.frame` as world; ask `worldCenter(of:)`. board.json is now **v2** (older
+> boards auto-migrate on open). A `.premigrate-bak` of recordentaln8n's board.json was left as a safety net.
+
+**▶ NEXT BUILD options:**
+- **Phase 2 — folder-as-card** (`SPEC-folder-canvas.md` §6 step 3): retire auto-grow; a folder becomes a
+  bounded **card / viewport** onto its own relative canvas (chip → card → entered along the zoom axis). Now
+  unblocked by Phase 1; build on the expandable folder-note card (T6).
+- **Cartographer altitude-awareness**: `canvas_arrange` could now lay out *within a folder's own canvas*
+  (recursive) — exactly the "altitude" the cartographer vision wants; Phase 1 makes it natural.
+- **Phase 3 — smart expansion** (per-folder view memory, title→preview→full spectrum, learned pre-expand).
+
+---
+
+## S27 — **Folder-Canvas Phase 1: relative-coordinate migration (PR #12, merged)**
+
+The structural foundation, shipped the invisible/behavior-preserving way. Detail is in the START-HERE block
+above + the PR #12 body. Approach that made the ~115-call-site refactor tractable: re-point the ONE chokepoint
+(`effectiveFrame`→`worldFrame`→`worldCenter`) and recognize that **sibling math (push/arrange/drag) is invariant**
+under a relative-coordinate change — only genuine cross-folder/screen world-reads + the create/re-parent write
+paths needed converting. The one real surprise was `reinInStrandedChildren`: its v1-global "re-anchor the folder
+onto its children's median" became "yank the folder to (0,0)" in relative space and **cascaded** up the real
+board (a deep subfolder → (0,0) ballooned its ancestors' frames → triggered their heal too) — caught by a
+**lossless check on the real 222-node board** (worldCenter vs the pre-migration global), not by the unit test.
+Lesson: for a migration, diff the derived state against a real pre-migration snapshot, not just a fixture.
+
+---
+
+## S26 — **parallel-PR merge train + visual pass** (edge promotion + cartographer polish + T8)
 
 **✅ Visual pass DONE (S26, end of session)** — drove the UI on a throwaway fixture (`/tmp/gapp-promote`: two
 collapsed cross-linked folders + colored note + expanded card) and confirmed all three S26 render changes:

@@ -34,9 +34,13 @@ folder-organization + smart expansion. Phasing is risk-ordered:
   interactive `EdgeLine` untouched. **Headless 8/8** (`Tests/EdgePromotionTests.swift`); build clean; app
   launches 0% CPU. ⬜ *Owe a visual eyeball:* collapse two folders that link across → one weighted folder↔folder
   connector appears (`SPEC-folder-canvas.md` §4).
-- ⬜ **Phase 1 — Relative-coord migration (invisible)**. board.json v1→v2; derive absolute via one
-  `worldCenter`/`effectiveFrame` chokepoint; keep auto-grow so it's pixel-identical. Kills moveSubtree
-  prefix-shifting + the coordinate-meltdown class. (§0–3, §5.)
+- ✅ **Phase 1 — Relative-coord migration (S27, PR #12)**. `BoardNode.x,y` now means center *relative to
+  parent*; absolute derived through `worldCenter`/`worldFrame`, with `effectiveFrame` re-pointed onto it
+  (render/hit-test/bounds/marquee world-correct, call sites untouched). One-time lossless `v1→v2`
+  `migrateToRelativeIfNeeded`; write paths convert on create/re-parent (drags invariant); `moveSubtree`
+  prefix-shifting gone; `reinInStrandedChildren` fixed for relative space. Auto-grow kept (Phase 2 retires
+  it) → pixel-identical. **Tests/RelativeCoordTests 13/13**; verified LOSSLESS on the real 222-node
+  recordentaln8n board (max world error 4.6e-13) + live re-parent/create. Kills the coordinate-meltdown class.
 - ⬜ **Phase 2 — Folder-as-card rendering**. Retire auto-grow; folder = bounded card/viewport onto its own
   canvas; chip→card→entered by zoom.
 - ⬜ **Phase 3 — Smart expansion**. Per-folder view memory; title→preview→full spectrum; learned pre-expand.
