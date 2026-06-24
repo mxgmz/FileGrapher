@@ -476,6 +476,31 @@ final class AppModel: ObservableObject {
         return min(max(v, sizeBound.lowerBound), sizeBound.upperBound)
     }
 
+    /// One-time **v1 → v2 migration** (SPEC-folder-canvas.md §1): reinterpret every stored `x,y` from a
+    /// GLOBAL center to one stored RELATIVE to its parent folder's center. Uses a *snapshot* of the
+    /// original globals (not freshly-written values) so nested nodes convert correctly regardless of
+    /// order. Lossless + reversible: after migration `worldCenter(of:)` reproduces the original global
+    /// exactly (asserted in Tests/RelativeCoordTests.swift). No-op once `version >= 2`. Run before any
+    /// world-derivation on the freshly loaded board; resave when it runs.
+    @discardableResult
+    func migrateToRelativeIfNeeded() -> Bool {
+        guard board.version < 2 else { return false }
+        let originalGlobal = Dictionary(uniqueKeysWithValues: board.nodes.map { ($0.id, $0.center) })
+        for i in board.nodes.indices {
+            let node = board.nodes[i]
+            // Root nodes keep their value (global == relative-to-origin); nested ones become a delta from
+            // the parent's ORIGINAL global, so the parent's own (later) rewrite can't corrupt the math.
+            if let parent = parentFolder(of: node),
+               let parentGlobal = originalGlobal[parent.id], let nodeGlobal = originalGlobal[node.id] {
+                board.nodes[i].center = CGPoint(x: nodeGlobal.x - parentGlobal.x,
+                                                y: nodeGlobal.y - parentGlobal.y)
+            }
+        }
+        board.version = 2
+        Log.disk.notice("Migrated board.json to v2 (relative coordinates) — \(self.board.nodes.count, privacy: .public) nodes.")
+        return true
+    }
+
     /// Repair any non-finite / out-of-range geometry already in `board` (e.g. a corrupt board.json
     /// with runaway coordinates). Returns true if anything was changed. A blunt clamp — it may stack
     /// previously-exploded boxes near the world edge, but it guarantees the board can always open
@@ -526,6 +551,11 @@ final class AppModel: ObservableObject {
             let frame = effectiveFrame(of: folder)
             guard frame.width > AppModel.maxSaneFolderSpan || frame.height > AppModel.maxSaneFolderSpan else { continue }
 
+            // Children are stored relative to this folder, so their median is the cluster center in the
+            // folder's OWN local space; pull egregious outliers back toward it (siblings, so distances are
+            // space-invariant). We never re-anchor the folder itself onto that median — post-migration the
+            // children already orbit the folder's center, so doing so would yank the folder to its parent's
+            // origin (the v1-global-era re-anchor that caused a deep-subfolder→(0,0) cascade).
             let anchorX = median(kids.map { $0.center.x })
             let anchorY = median(kids.map { $0.center.y })
             var slot = 0
@@ -538,7 +568,6 @@ final class AppModel: ObservableObject {
                 board.nodes[fi].width = AppModel.folderSize.width
                 board.nodes[fi].height = AppModel.folderSize.height
             }
-            board.nodes[fi].center = CGPoint(x: anchorX, y: anchorY)
             changed = true
         }
         if changed {
@@ -548,16 +577,11 @@ final class AppModel: ObservableObject {
     }
 
     /// Move a box (and its whole subtree, rigid-body) so the box lands at `center`. Coordinates clamped.
+    /// Move a node (and, implicitly, its whole subtree) to a new center in its PARENT's local space.
+    /// Post-migration the children are stored relative to this node, so changing only the node's own
+    /// center carries them along — the old prefix-shift of every descendant is gone (SPEC §3).
     private func moveSubtree(_ id: UUID, to center: CGPoint) {
-        guard let i = board.nodes.firstIndex(where: { $0.id == id }) else { return }
-        let dx = center.x - board.nodes[i].center.x
-        let dy = center.y - board.nodes[i].center.y
-        board.nodes[i].center = CGPoint(x: AppModel.clampCoord(center.x), y: AppModel.clampCoord(center.y))
-        let prefix = board.nodes[i].relPath + "/"
-        for j in board.nodes.indices where board.nodes[j].relPath.hasPrefix(prefix) {
-            board.nodes[j].center = CGPoint(x: AppModel.clampCoord(board.nodes[j].center.x + dx),
-                                            y: AppModel.clampCoord(board.nodes[j].center.y + dy))
-        }
+        setPosition(id, to: center)
     }
 
     private func median(_ values: [CGFloat]) -> CGFloat {
@@ -633,8 +657,9 @@ final class AppModel: ObservableObject {
         if board.nodes.isEmpty {
             target = CGPoint(x: 10000, y: 10000)
         } else {
-            let avgX = board.nodes.map { $0.x }.reduce(0, +) / Double(board.nodes.count)
-            let avgY = board.nodes.map { $0.y }.reduce(0, +) / Double(board.nodes.count)
+            let centers = board.nodes.map { worldCenter(of: $0) }   // average WORLD centers, not relative
+            let avgX = centers.map(\.x).reduce(0, +) / Double(centers.count)
+            let avgY = centers.map(\.y).reduce(0, +) / Double(centers.count)
             target = CGPoint(x: avgX, y: avgY)
         }
         pan = CGSize(width: viewport.width / 2 - target.x * zoom,
@@ -691,11 +716,13 @@ final class AppModel: ObservableObject {
         let v = Vault(root: url)
         vault = v
         board = v.loadBoard()
+        // Migrate global→relative coords FIRST (v1→v2), before anything derives a world position.
+        let migrated = migrateToRelativeIfNeeded()
         // Self-heal a corrupt board before it can hang or become unusable: clamp runaway coords, then
         // pull any stranded folder child back so no folder auto-grows to an unclickable size.
         let repaired = sanitizeBoardGeometry()
         let healed = reinInStrandedChildren()
-        if repaired || healed { v.saveBoard(board) }
+        if migrated || repaired || healed { v.saveBoard(board) }
         UserDefaults.standard.set(url.path, forKey: defaultsKey)
         clearHistory()
         syncFromDisk()
@@ -1172,15 +1199,16 @@ final class AppModel: ObservableObject {
     /// cascade for batches. Never a fixed far corner (which stranded children and ballooned folders).
     private func spawnCenter(forNew rel: String, index: Int) -> CGPoint {
         let parent = (rel as NSString).deletingLastPathComponent
+        // Result is stored directly as the new node's center, so it must be in the PARENT's local space.
         let anchor: CGPoint
-        if !parent.isEmpty,
-           let near = directChildren(of: parent).first?.center
-                      ?? board.nodes.first(where: { $0.relPath == parent })?.center {
-            anchor = CGPoint(x: near.x + 150, y: near.y)
-        } else if viewport != .zero {
-            anchor = screenToWorld(CGPoint(x: viewport.width / 2, y: viewport.height / 2))
+        if let sibling = directChildren(of: parent).first {
+            anchor = CGPoint(x: sibling.center.x + 150, y: sibling.center.y)   // beside an existing sibling
         } else {
-            anchor = CGPoint(x: 10000, y: 10000)
+            // No sibling: aim for the viewport center, expressed in the parent's local space.
+            let world = viewport != .zero
+                ? screenToWorld(CGPoint(x: viewport.width / 2, y: viewport.height / 2))
+                : CGPoint(x: 10000, y: 10000)
+            anchor = relativeCenter(world, inDir: parent)
         }
         return CGPoint(x: anchor.x + CGFloat(index % 5) * 200, y: anchor.y + CGFloat(index / 5) * 120)
     }
@@ -1352,6 +1380,59 @@ final class AppModel: ObservableObject {
         board.nodes.filter { $0.parentRel == relPath }
     }
 
+    // MARK: World coordinates (relative storage → absolute derivation — SPEC-folder-canvas.md §0–2)
+    //
+    // A node's stored `x,y` is its center *relative to its parent folder's center* (root nodes: relative
+    // to the world origin, so their stored value already IS world). Absolute position is **derived** by
+    // summing the ancestor chain. This is the single place that derivation lives — `effectiveFrame` and
+    // every world-reader route through it, so the ~115 position-reads didn't have to change.
+    // ponytail: recomputes the chain per call (no memo). Boards are shallow + node counts modest; add a
+    // revision-keyed cache (SPEC §7) only if a deep/huge vault profiles slow.
+
+    /// The folder a node lives directly inside, or nil at the vault root.
+    func parentFolder(of node: BoardNode) -> BoardNode? {
+        let parent = node.parentRel
+        guard !parent.isEmpty else { return nil }
+        return board.nodes.first { $0.kind == .folder && $0.relPath == parent }
+    }
+
+    /// A folder's anchor in world space = its own world center (its children are stored relative to it).
+    func worldOrigin(of folder: BoardNode) -> CGPoint { worldCenter(of: folder) }
+
+    /// Absolute (world) center of a node: its relative center plus every ancestor folder's, to the root.
+    /// The sum telescopes because each level's stored center is relative to the next level up.
+    func worldCenter(of node: BoardNode) -> CGPoint {
+        var x = node.x, y = node.y
+        var current = node
+        var depth = 0
+        var seen = Set<String>([node.relPath])   // cycle guard, mirrors effectiveFrame's
+        while let parent = parentFolder(of: current) {
+            guard depth < AppModel.maxFolderDepth, seen.insert(parent.relPath).inserted else {
+                warnFolderCycle(at: parent.relPath, depth: depth); break
+            }
+            x += parent.x; y += parent.y
+            current = parent
+            depth += 1
+        }
+        return CGPoint(x: x, y: y)
+    }
+
+    /// World-space frame of a node (its size centered on its world center). Replaces `node.frame` for
+    /// any read that needs absolute coordinates; `effectiveFrame` is built on it.
+    func worldFrame(of node: BoardNode) -> CGRect {
+        let c = worldCenter(of: node)
+        return CGRect(x: c.x - node.width / 2, y: c.y - node.height / 2, width: node.width, height: node.height)
+    }
+
+    /// Convert a world point to a center stored relative to `dir` (the parent folder; "" == root). The
+    /// one conversion the write paths need when a box is created in, or re-parented into, a folder.
+    func relativeCenter(_ world: CGPoint, inDir dir: String) -> CGPoint {
+        guard !dir.isEmpty, let folder = board.nodes.first(where: { $0.kind == .folder && $0.relPath == dir })
+        else { return world }
+        let o = worldOrigin(of: folder)
+        return CGPoint(x: world.x - o.x, y: world.y - o.y)
+    }
+
     /// A folder's displayed frame: its stored frame, grown to enclose its contents
     /// (plus padding and header). Notes return their plain frame.
     ///
@@ -1437,7 +1518,7 @@ final class AppModel: ObservableObject {
             guard let a = byId[edge.from], let b = byId[edge.to],
                   (inScope(a) || inScope(b)), !hidden(a), !hidden(b) else { continue }
             let line = NSBezierPath()
-            line.move(to: img(a.center)); line.line(to: img(b.center))
+            line.move(to: img(worldCenter(of: a))); line.line(to: img(worldCenter(of: b)))
             line.lineWidth = 1.5; line.stroke()
         }
 
@@ -1453,16 +1534,16 @@ final class AppModel: ObservableObject {
     private var lastFolderCycleWarning: Date?
 
     private func effectiveFrame(of node: BoardNode, visited: inout Set<String>, depth: Int) -> CGRect {
-        guard node.kind == .folder else { return node.frame }
+        guard node.kind == .folder else { return worldFrame(of: node) }
         // Collapsed: short-circuit the (hot, recursive) auto-grow — a collapsed folder is just its
         // header strip + count badge; its children are hidden, so they never widen the frame.
         if node.isCollapsedFolder { return collapsedFrame(of: node) }
         // Cycle / runaway guard: bail loudly rather than recurse into an infinite loop.
         guard depth < AppModel.maxFolderDepth, visited.insert(node.relPath).inserted else {
             warnFolderCycle(at: node.relPath, depth: depth)
-            return node.frame
+            return worldFrame(of: node)
         }
-        var frame = node.frame
+        var frame = worldFrame(of: node)
         let children = directChildren(of: node.relPath)
         if !children.isEmpty {
             var bounds = effectiveFrame(of: children[0], visited: &visited, depth: depth + 1)
@@ -1498,11 +1579,11 @@ final class AppModel: ObservableObject {
     /// than its stored frame so collapse only ever shrinks.
     private static let collapsedFolderWidth: CGFloat = 220
 
-    /// A collapsed folder's frame: just the header strip, anchored at the stored top-left.
+    /// A collapsed folder's frame: just the header strip, anchored at the stored (world) top-left.
     func collapsedFrame(of node: BoardNode) -> CGRect {
-        let width = min(node.frame.width, AppModel.collapsedFolderWidth)
-        return CGRect(x: node.frame.minX, y: node.frame.minY,
-                      width: width, height: AppModel.folderHeaderHeight)
+        let wf = worldFrame(of: node)
+        let width = min(wf.width, AppModel.collapsedFolderWidth)
+        return CGRect(x: wf.minX, y: wf.minY, width: width, height: AppModel.folderHeaderHeight)
     }
 
     /// Boxes hidden from render / hit-test / marquee because an ancestor folder is collapsed. They
@@ -1785,7 +1866,11 @@ final class AppModel: ObservableObject {
             rawMove(oldRel, newRel)
             fR.append { self.rawMove(oldRel, newRel) }
             fU.append { self.rawMove(newRel, oldRel) }
+            // Keep the box where the user dropped it: convert its world center into the new parent's
+            // local space (children are relative to it, so they travel along untouched).
+            let worldBefore = worldCenter(of: board.nodes[idx])
             board.nodes[idx].relPath = newRel
+            board.nodes[idx].center = relativeCenter(worldBefore, inDir: newDir)
             if current.kind == .folder { reparentChildren(oldPrefix: oldRel, newPrefix: newRel) }
         }
 
@@ -1814,8 +1899,9 @@ final class AppModel: ObservableObject {
             if !dir.isEmpty { rawCreateDir(dir) }
             let rel = vault.uniqueRel(dir: dir, base: "Untitled", ext: "md")
             tCreateFile(rel)
+            let stored = relativeCenter(center, inDir: dir)   // `center` is world; store relative to `dir`
             let node = BoardNode(kind: .note, relPath: rel,
-                                 x: center.x, y: center.y,
+                                 x: stored.x, y: stored.y,
                                  width: AppModel.noteSize.width, height: AppModel.noteSize.height)
             board.nodes.append(node)
             selection = [node.id]
@@ -1834,8 +1920,9 @@ final class AppModel: ObservableObject {
             if !dir.isEmpty { rawCreateDir(dir) }
             let rel = vault.uniqueRel(dir: dir, base: "Folder", ext: "")
             tCreateDir(rel)
+            let stored = relativeCenter(center, inDir: dir)   // `center` is world; store relative to `dir`
             let node = BoardNode(kind: .folder, relPath: rel,
-                                 x: center.x, y: center.y,
+                                 x: stored.x, y: stored.y,
                                  width: AppModel.folderSize.width, height: AppModel.folderSize.height)
             board.nodes.append(node)
             selection = [node.id]
@@ -1850,7 +1937,7 @@ final class AppModel: ObservableObject {
     func spawn(from node: BoardNode, direction: Direction) {
         let gap: CGFloat = 56
         let newSize = node.kind == .folder ? AppModel.folderSize : AppModel.noteSize
-        var c = node.center
+        var c = worldCenter(of: node)   // place the sibling in world space; addNote/addFolder store relative
         switch direction {
         case .right: c.x += node.size.width / 2 + gap + newSize.width / 2
         case .left:  c.x -= node.size.width / 2 + gap + newSize.width / 2
@@ -1874,8 +1961,10 @@ final class AppModel: ObservableObject {
     @discardableResult
     func addChildNote(inFolder folder: BoardNode) -> UUID? {
         let count = board.nodes.filter { $0.parentRel == folder.relPath }.count
-        let x = folder.x - folder.width / 2 + 56 + CGFloat(count % 3) * 150
-        let y = folder.y - folder.height / 2 + 70 + CGFloat(count / 3) * 84
+        // Tile inside the folder's interior, in world space (addNote stores it relative to the folder).
+        let wc = worldCenter(of: folder)
+        let x = wc.x - folder.width / 2 + 56 + CGFloat(count % 3) * 150
+        let y = wc.y - folder.height / 2 + 70 + CGFloat(count / 3) * 84
         return addNote(inDir: folder.relPath, at: CGPoint(x: x, y: y))
     }
 
@@ -1918,7 +2007,10 @@ final class AppModel: ObservableObject {
 
         transaction {
             tMove(oldRel, newRel)
+            // Preserve the box's world position across the re-parent (see endDrag.relocate).
+            let worldBefore = worldCenter(of: board.nodes[idx])
             board.nodes[idx].relPath = newRel
+            board.nodes[idx].center = relativeCenter(worldBefore, inDir: newDir)
             if node.kind == .folder {
                 reparentChildren(oldPrefix: oldRel, newPrefix: newRel)
             }
@@ -2003,12 +2095,16 @@ final class AppModel: ObservableObject {
             targetDir = ""
         }
 
-        // Move the whole group so the centroid of its roots lands on the paste point.
+        // Move the whole group so the centroid of its roots lands on the paste point — computed in the
+        // TARGET folder's local space (the roots get stored relative to it; their subtrees follow).
+        let targetOrigin = targetDir.isEmpty ? .zero
+            : (board.nodes.first { $0.kind == .folder && $0.relPath == targetDir }.map { worldOrigin(of: $0) } ?? .zero)
         let centers = clipboard.map { $0.node.center }
         let anchor = CGPoint(x: centers.map(\.x).reduce(0, +) / Double(centers.count),
                              y: centers.map(\.y).reduce(0, +) / Double(centers.count))
         let cascade = isCut ? 0 : Double(pasteCount) * 24
-        let delta = CGSize(width: point.x - anchor.x + cascade, height: point.y - anchor.y + cascade)
+        let delta = CGSize(width: (point.x - targetOrigin.x) - anchor.x + cascade,
+                           height: (point.y - targetOrigin.y) - anchor.y + cascade)
         func shifted(_ c: CGPoint) -> CGPoint { CGPoint(x: c.x + delta.width, y: c.y + delta.height) }
 
         var newSelection = Set<UUID>()
@@ -2038,11 +2134,11 @@ final class AppModel: ObservableObject {
         board.nodes.append(root)
         select.insert(root.id)
         // Recreate boxes for the duplicated subtree; their files already exist from the copyItem.
+        // Descendants keep their (relative-to-parent) centers — only the root is repositioned.
         for d in entry.descendants where d.relPath.hasPrefix(src.relPath + "/") {
             var dn = d
             dn.id = UUID()
             dn.relPath = newRel + String(d.relPath.dropFirst(src.relPath.count))
-            dn.center = shift(d.center)
             board.nodes.append(dn)
         }
     }
@@ -2054,12 +2150,8 @@ final class AppModel: ObservableObject {
         // Don't move a folder into itself or its own subtree.
         if live.kind == .folder, targetDir == live.relPath || targetDir.hasPrefix(live.relPath + "/") { return }
         board.nodes[idx].center = shift(live.center)
-        // Carry the subtree's boxes along (reposition by the same delta).
-        for d in entry.descendants {
-            if let di = board.nodes.firstIndex(where: { $0.id == d.id }) {
-                board.nodes[di].center = shift(board.nodes[di].center)
-            }
-        }
+        // The subtree's boxes are stored relative to this root, so moving the root carries them along —
+        // no per-descendant reposition (their relPath prefix is fixed up by reparentChildren below).
         // Re-file on disk if the target folder differs.
         if live.parentRel != targetDir {
             let name = (live.relPath as NSString).lastPathComponent
@@ -2214,8 +2306,10 @@ final class AppModel: ObservableObject {
         guard let idx = board.nodes.firstIndex(where: { $0.id == id }) else { return }
         board.nodes[idx].width = AppModel.clampSize(frame.width, fallback: gappDefaultNoteSize.width)
         board.nodes[idx].height = AppModel.clampSize(frame.height, fallback: gappDefaultNoteSize.height)
-        board.nodes[idx].center = CGPoint(x: AppModel.clampCoord(frame.midX),
-                                          y: AppModel.clampCoord(frame.midY))
+        // `frame` is world (from resizedFrame); store the center relative to this box's parent.
+        let stored = relativeCenter(CGPoint(x: frame.midX, y: frame.midY), inDir: board.nodes[idx].parentRel)
+        board.nodes[idx].center = CGPoint(x: AppModel.clampCoord(stored.x),
+                                          y: AppModel.clampCoord(stored.y))
     }
 
     /// The set of boxes that move together when `id` is dragged. If `id` is part of a multi-selection,
@@ -2441,8 +2535,9 @@ final class AppModel: ObservableObject {
         selection = [id]
         selectedEdge = nil
         guard viewport != .zero else { return }
-        pan = CGSize(width: viewport.width / 2 - n.x * zoom,
-                     height: viewport.height / 2 - n.y * zoom)
+        let c = worldCenter(of: n)
+        pan = CGSize(width: viewport.width / 2 - c.x * zoom,
+                     height: viewport.height / 2 - c.y * zoom)
     }
 
     /// Center the view on existing content (or world center) the first time we have a size.
