@@ -49,9 +49,17 @@ Scrum-style board. **Status legend:** ✅ done · 🔄 in progress · ⬜ todo �
   `ManagedLinks.wikilinkTargets`. `Tests/PerceptionTests`; live-verified on the throwaway vault (scope, cap,
   ids, links). **Not wired into `run-garden.sh`** — the layout custodian stays content-blind; `canvas_read`
   joins a broader allow-list only alongside authoring.
-- ⬜ **Authoring (`canvas_write`)** — the second half of meaning-aware work: write folder-notes / summaries /
-  semantic links. Must honor the no-prose-clobber law (managed `<!-- canvas-links -->` block / folder-notes /
-  `saveFileContent`). The riskier piece (it mutates content) — build on perception.
+- ✅ **Authoring (`canvas_write`) (S32, PR #25)** — the second half of meaning-aware work. Writes prose
+  (summary / MOC / folder-note body) into a note's app-managed **`<!-- canvas-note -->`** block — the prose
+  twin of the canvas-links block. **No-prose-clobber by construction:** it only ever creates/replaces/removes
+  that one fenced block; the user's own prose is never touched. Idempotent (re-running replaces, no dup — safe
+  to re-summarize); empty `text` clears it; routed through `saveFileContent` so it's undoable; guarded against
+  folders + time-travel. Refactored `ManagedLinks` so links + note blocks share one `setBlock` core, and made
+  it **preserve the file's trailing newline** (write→clear is now byte-identical). `Tests/AuthoringTests`;
+  live-verified on the throwaway vault (write preserves prose, byte-identical round-trip, idempotent re-write,
+  `canvas_read` parses the block's link, folder guard). Full-body overwrite deferred (YAGNI — the fenced block
+  covers summaries/folder-notes and is re-runnable). **→ Meaning-aware custodian now possible:** layout tools
+  + `canvas_read` + `canvas_write` can finally drop orphans by linking/summarizing by meaning.
 
 ### Epic B — Folders Are Canvases (the spatial foundation)
 **Specs:** `VISION-folder-canvas.md` + `SPEC-folder-canvas.md`. **Specced, not built.** Prereq for proper

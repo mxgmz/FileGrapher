@@ -10,6 +10,11 @@ import Foundation
 enum ManagedLinks {
     static let openMarker = "<!-- canvas-links -->"
     static let closeMarker = "<!-- /canvas-links -->"
+    // The prose twin of the links block: an app-owned freeform region (summaries, folder-notes, MOCs)
+    // the agent can write/rewrite without ever touching the user's own prose. Distinct markers so the
+    // two managed blocks coexist in one note.
+    static let noteOpenMarker = "<!-- canvas-note -->"
+    static let noteCloseMarker = "<!-- /canvas-note -->"
 
     /// Wikilink targets listed in `text`'s managed block, in listed order (empty when there's no
     /// block). Only the managed block is read here; for every `[[link]]` in the prose use
@@ -34,38 +39,53 @@ enum ManagedLinks {
         return deduplicated(found)
     }
 
-    /// `text` with its managed block rewritten to list exactly `targets` (deduplicated, order
+    /// `text` with its managed links block rewritten to list exactly `targets` (deduplicated, order
     /// preserved). Removes the block entirely when `targets` is empty. Content outside the markers
     /// is never altered. No-op (returns `text` unchanged) when there's nothing to add or remove.
     static func write(_ targets: [String], into text: String) -> String {
-        let wanted = deduplicated(targets)
-        var lines = text.components(separatedBy: "\n")
-        let existing = blockRange(in: lines)
+        setBlock(deduplicated(targets).map { "- [[\($0)]]" }, open: openMarker, close: closeMarker, in: text)
+    }
 
-        if wanted.isEmpty {
-            guard let existing else { return text }
-            lines.removeSubrange(existing)
-            trimBlankSeam(&lines, at: existing.lowerBound)
-            return lines.joined(separator: "\n")
-        }
-
-        let block = render(wanted)
-        if let existing {
-            lines.replaceSubrange(existing, with: block)
-        } else {
-            appendBlock(block, to: &lines)
-        }
-        return lines.joined(separator: "\n")
+    /// `text` with its app-managed *note* block rewritten to exactly `body` (split into lines). Removes
+    /// the block when `body` is blank. The user's own prose outside the markers is never touched — this
+    /// is the no-prose-clobber authoring path. No-op when nothing changes.
+    static func writeNote(_ body: String, into text: String) -> String {
+        let trimmed = body.trimmingCharacters(in: .whitespacesAndNewlines)
+        let inner = trimmed.isEmpty ? [] : trimmed.components(separatedBy: "\n")
+        return setBlock(inner, open: noteOpenMarker, close: noteCloseMarker, in: text)
     }
 
     // MARK: Internals
 
-    /// Inclusive line range of the managed block (open marker … close marker), or nil if absent.
-    private static func blockRange(in lines: [String]) -> ClosedRange<Int>? {
-        guard let open = lines.firstIndex(where: { $0.trimmed == openMarker }),
-              let close = lines[(open + 1)...].firstIndex(where: { $0.trimmed == closeMarker })
+    /// Rewrite the `open`…`close` fenced block in `text` to `inner` (markers re-added around it): replace
+    /// it in place if present, append it otherwise, or remove it entirely when `inner` is empty. Lines
+    /// outside the markers are never touched. The shared core under both `write` and `writeNote`.
+    private static func setBlock(_ inner: [String], open: String, close: String, in text: String) -> String {
+        var lines = text.components(separatedBy: "\n")
+        let existing = blockRange(in: lines, open: open, close: close)
+        if inner.isEmpty {
+            guard let existing else { return text }
+            lines.removeSubrange(existing)
+            trimBlankSeam(&lines, at: existing.lowerBound)
+        } else {
+            let block = [open] + inner + [close]
+            if let existing { lines.replaceSubrange(existing, with: block) }
+            else { appendBlock(block, to: &lines) }
+        }
+        let result = lines.joined(separator: "\n")
+        // Preserve the file's trailing newline (markdown convention) — the block machinery strips it
+        // otherwise, churning the EOF on every write. User prose is unchanged either way; this just keeps
+        // a write→clear round-trip byte-identical for files that ended in a newline.
+        return text.hasSuffix("\n") && !result.hasSuffix("\n") ? result + "\n" : result
+    }
+
+    /// Inclusive line range of the `open`…`close` block, or nil if absent. Defaults to the links markers
+    /// so `targets` reads the links block.
+    private static func blockRange(in lines: [String], open: String = openMarker, close: String = closeMarker) -> ClosedRange<Int>? {
+        guard let openIndex = lines.firstIndex(where: { $0.trimmed == open }),
+              let closeOffset = lines[(openIndex + 1)...].firstIndex(where: { $0.trimmed == close })
         else { return nil }
-        return open...close
+        return openIndex...closeOffset
     }
 
     /// Parse the wikilink target from one list line (`- [[Target]] — note` → "Target"), or nil.
@@ -84,10 +104,6 @@ enum ManagedLinks {
         if let hash = inner.firstIndex(of: "#") { inner = String(inner[..<hash]) }
         let trimmed = inner.trimmed
         return trimmed.isEmpty ? nil : trimmed
-    }
-
-    private static func render(_ targets: [String]) -> [String] {
-        [openMarker] + targets.map { "- [[\($0)]]" } + [closeMarker]
     }
 
     private static func appendBlock(_ block: [String], to lines: inout [String]) {

@@ -188,6 +188,23 @@ final class MCPServer {
                 if firstLink, model.node(from)?.kind == .note { model.placeNearKin(newNode: from, anchor: to) }
                 reply(.success(Self.toolText("Linked \(from.uuidString) → \(to.uuidString) — wrote the [[wikilink]]")))
 
+            case "canvas_write":
+                guard let id = Self.uuid(args["id"]), let target = model.node(id) else {
+                    return reply(.failure(ToolError("write needs a valid 'id'")))
+                }
+                guard target.kind != .folder else {
+                    return reply(.failure(ToolError("Folders have no content; write to a note (e.g. a folder-note).")))
+                }
+                guard !model.isTimeTraveling else {
+                    return reply(.failure(ToolError("Can't write while viewing history")))
+                }
+                // Honor the no-prose-clobber law: only ever touch the app-managed canvas-note block.
+                let text = args["text"] as? String ?? ""
+                model.saveFileContent(id, ManagedLinks.writeNote(text, into: model.fileText(id)))
+                reply(.success(Self.toolText(text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                    ? "Cleared \(target.name)'s canvas-note block"
+                    : "Wrote \(text.count) chars into \(target.name)'s canvas-note block — your prose untouched")))
+
             case "canvas_move":
                 guard let id = Self.uuid(args["id"]), let target = model.node(id) else {
                     return reply(.failure(ToolError("move needs a valid 'id'")))
@@ -408,6 +425,18 @@ final class MCPServer {
                     "to": ["type": "string", "description": "Target box id."],
                 ],
                 "required": ["from", "to"],
+            ],
+        ],
+        [
+            "name": "canvas_write",
+            "description": "Authoring — write prose (a summary, a map-of-content, a folder-note body) INTO a note's app-managed `<!-- canvas-note -->` block. The user's OWN prose is never touched: this only creates/replaces/removes that one fenced block, and re-running replaces it (idempotent — safe to re-summarize). Pass empty `text` to clear it. Pair with canvas_create_note to make a fresh note, then fill it. Folders have no content. Undoable with one ⌘Z.",
+            "inputSchema": [
+                "type": "object",
+                "properties": [
+                    "id": ["type": "string", "description": "Box id of the note to write into."],
+                    "text": ["type": "string", "description": "Markdown to place in the managed note block; empty/omitted clears it."],
+                ],
+                "required": ["id"],
             ],
         ],
         [

@@ -5,7 +5,43 @@ open questions. At a session's start, read the top entry to pick up where we lef
 
 ---
 
-## ▶ NEXT SESSION — START HERE · S31 — **Perception shipped (`canvas_read`). Agents can now read note content + the intended link graph. Next: authoring (`canvas_write`).**
+## ▶ NEXT SESSION — START HERE · S32 — **Authoring shipped (`canvas_write`). The meaning-aware custodian is now possible: read + write + layout. Next: wire it (broader allow-list) OR a UI surface for the canvas-note block.**
+
+> ✍️ **S32 — Authoring (`canvas_write`), PR #25.** The second half of meaning-aware work. Writes prose (a
+> summary / map-of-content / folder-note body) into a note's app-managed **`<!-- canvas-note -->`** block —
+> the *prose twin* of the `<!-- canvas-links -->` block. **No-prose-clobber by construction:** the tool only
+> ever creates/replaces/removes that one fenced block, so the user's own prose is physically untouchable.
+> Idempotent (re-running replaces in place, no duplicate markers — a custodian can re-summarize freely);
+> empty `text` clears the block; routed through the existing undoable `saveFileContent` (one ⌘Z); guarded
+> against folders (no content) and time-travel (history is read-only).
+>
+> **Conventions / lazy notes:** no new file or `AppModel` method — the tool body is 2 lines in the
+> `MCPServer` dispatch (`ManagedLinks.writeNote` + `saveFileContent`). The prose-block writer went into its
+> home, `ManagedLinks`, and I **refactored** so `write` (links) and `writeNote` (prose) share one private
+> `setBlock` core (parameterized `blockRange` by markers, dropped the now-dead `render`). While there, fixed a
+> latent wart the links block also had: `setBlock` now **preserves the file's trailing newline** (the seam
+> logic stripped it, churning EOF on every write) — so a write→clear round-trip is **byte-identical**.
+> `Tests/AuthoringTests` (11 checks: prose preserved, idempotent, clear, coexistence with the links block,
+> byte-identical round-trip, + a regression net re-covering `write`). **Live-verified** over HTTP on
+> `/tmp/gapp-garden`: write preserves prose + EOF newline, write→clear byte-identical (hash `edcb348a` →
+> `edcb348a`), idempotent re-write (one block), `canvas_read` parses the block's `[[idea-graph]]` (perception +
+> authoring compose), folder guard errors. **main after merge; build clean; all suites pass.**
+>
+> ⏭️ **Next (pick one):** (a) **wire the meaning-aware custodian** — a new allow-list = layout tools +
+> `canvas_read` + `canvas_write` (+ `canvas_link`/`create_note`), and a prompt that reads orphans, then links
+> or summarizes them *by meaning* (the limit the layout-only garden demo hit). `run-garden.sh` stays
+> layout-only; add a sibling `run-cartographer.sh`. (b) **a UI surface** for the canvas-note block (render it
+> distinctly in the card/peek so a human sees agent-written summaries as app-owned, editable/removable).
+> (a) is the natural close of the "right work" arc — it makes the orphans actually droppable.
+
+> ⚠️ **Verify note (unchanged from S31):** MCP tools were exercised on the throwaway vault, not
+> `recordentaln8n` (the freshly-built bundle hits the ~/Documents TCC wall on relaunch → WelcomeView → no
+> in-app server). To smoke-test on the real vault, grant the bundle Documents access, then call via
+> `scratchpad/mcp2.py <vault>/.graphingapp/mcp.json <tool> '{...}'`.
+
+---
+
+## S31 — **Perception shipped (`canvas_read`). Agents can now read note content + the intended link graph. Next: authoring (`canvas_write`).**
 
 > 👁️ **S31 — Perception (`canvas_read`), PR #24.** The single biggest unlock from the "right work" call: agents
 > were *semantically blind* (`canvas_get` is layout-only). Now a read-only **`canvas_read`** returns note
