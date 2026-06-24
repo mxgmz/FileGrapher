@@ -41,8 +41,14 @@ folder-organization + smart expansion. Phasing is risk-ordered:
   prefix-shifting gone; `reinInStrandedChildren` fixed for relative space. Auto-grow kept (Phase 2 retires
   it) → pixel-identical. **Tests/RelativeCoordTests 13/13**; verified LOSSLESS on the real 222-node
   recordentaln8n board (max world error 4.6e-13) + live re-parent/create. Kills the coordinate-meltdown class.
-- ⬜ **Phase 2 — Folder-as-card rendering**. Retire auto-grow; folder = bounded card/viewport onto its own
-  canvas; chip→card→entered by zoom.
+- 🔄 **Phase 2 — Folder-as-card rendering**. *(Max chose the lean slice first.)*
+  - ✅ **Bound auto-grow (S28, PR #13)** — a folder still fits its near children, but `autoGrowChildren`
+    excludes a far-flung **outlier** (>6000px from the sibling median) so one scattered box can't balloon the
+    folder (it renders loose). `effectiveFrame` + `contentsBounds` use it. Cluster-relative (tall legit stacks
+    kept). Threshold tuned on the real board (~2% excluded). **Tests/AutoGrowBoundTests**; live + real-board
+    verified.
+  - ⬜ **Full folder-as-card** (deferred): retire auto-grow entirely; folder = bounded card/viewport that
+    clips + scrolls its own canvas; chip→card→**entered** by zoom.
 - ⬜ **Phase 3 — Smart expansion**. Per-folder view memory; title→preview→full spectrum; learned pre-expand.
 
 ---

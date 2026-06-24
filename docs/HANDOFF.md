@@ -5,12 +5,44 @@ open questions. At a session's start, read the top entry to pick up where we lef
 
 ---
 
-## ▶ NEXT SESSION — START HERE · S28 — **Phase 1 (relative coords) landed. Next: Phase 2 (folder-as-card).**
+## ▶ NEXT SESSION — START HERE · S29 — **Phase 2 lean slice (bound auto-grow) done. Next: full folder-as-card, or Phase 3.**
+
+S28 shipped the **lean Phase 2 slice — "bound auto-grow"** (PR #13, merged): Max chose the smallest step before
+full folder-as-card. A folder still fits its near children, but `AppModel.autoGrowChildren` excludes a far-flung
+**outlier** (>6000px from the sibling median) so one scattered box can't balloon the folder — it renders loose.
+`effectiveFrame` + `contentsBounds` use it; the threshold was **tuned on the real recordentaln8n board** (excludes
+only ~2% — the genuine far-flung outliers — leaving every legit cluster/tall-stack intact). **main @ `8d00823`
+(+ this doc commit), build clean, all 5 headless suites pass** (`Tests/AutoGrowBoundTests` added). Live-verified:
+a folder with a 7000px outlier stays compact; real board opens healthy.
+
+**▶ NEXT BUILD options:**
+- **Full folder-as-card** (the rest of `SPEC-folder-canvas.md` §6 step 3): retire auto-grow entirely; a folder
+  becomes a bounded **card / viewport** that **clips + scrolls** its own canvas; chip→card→**entered** by zoom.
+  This is the big behavior-changing one — Max deferred it this session in favor of the lean bound. Needs the
+  transition (seed each folder's card size from its current auto-grown size so nothing jumps) + a scrollable
+  clipped interior, and (the biggest piece) zoom-to-enter a sub-canvas.
+- **Phase 3 — smart expansion**: per-folder view memory (expanded set + pan/zoom on the folder), title→preview→full
+  spectrum, learned pre-expand from open-counts.
+- **Cartographer altitude-awareness**: `canvas_arrange` within a folder's own canvas (now natural post-Phase-1).
+
+---
+
+## S28 — **Folder-Canvas Phase 2 (lean): bound auto-grow (PR #13, merged)**
+
+Max picked the **smallest** of three Phase-2 scopes (bound auto-grow vs. full zoom-spectrum vs. just-cap). Built
+`autoGrowChildren(of:)` (drop children >`autoGrowOutlierRadius` 6000px from the sibling median; cluster-relative
+so tall legit stacks survive), wired into `effectiveFrame` + `contentsBounds`. **Picked the threshold from DATA**:
+measured every folder's child-spread on the real board first — at 6000px only ~2% (5 far-flung READMEs in tools/*)
+drop, so legit layouts are untouched. Collapsed folders unaffected (they use `collapsedFrame`). Headless +
+fixture-visual + real-board-health verified. *Deferred: the full folder-as-card (clip/scroll/zoom-enter).*
+
+---
+
+## S27 — **Folder-Canvas Phase 1: relative-coordinate migration (PR #12, merged)** — *(was the S28 START-HERE)*
 
 S27 shipped **Folder-Canvas Phase 1 — the relative-coordinate migration** (PR #12, merged) — the scary
 structural one, done invisibly + behavior-preserving and **verified lossless on the real 222-node board**.
-**main @ `88c569e` (+ this doc commit), build clean, all 4 headless suites pass.** The coordinate foundation
-is in place; the cartographer/folder epics can build on it.
+**main @ `88c569e`, build clean, all 4 headless suites pass.** The coordinate foundation is in place.
 
 **What shipped (S27):** `BoardNode.x,y` is now **center relative to the parent folder** (root unchanged);
 absolute derived through `worldCenter`/`worldFrame`, with `effectiveFrame` re-pointed onto it so render /
