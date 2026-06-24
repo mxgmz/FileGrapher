@@ -5,7 +5,16 @@ open questions. At a session's start, read the top entry to pick up where we lef
 
 ---
 
-## ▶ NEXT SESSION — START HERE · S30 — **3 parallel lanes + card polish + Phase 3 preview + cartographer layout-switching SHIPPED. Next: parallel quick-wins, or Phase 3 "learned" (parked).**
+## ▶ NEXT SESSION — START HERE · S30 — **3 lanes + card polish + Phase 3 preview + cartographer layout-switching + gardening infra SHIPPED. Next: the agent gardening loop, or perception (read-content).**
+
+> 🧭 **Agent "right work" — decided this session.** Assessed whether agents have enough tools to do the
+> real work. Verdict: they have **good hands** (create/link/move/arrange×4/expand/collapse/resize/color) and
+> **crude eyes** (schematic `canvas_screenshot`), but **no reading and no writing of note content** —
+> `canvas_get` is structure-only. So agents are strong *spatial librarians* but *semantically blind*. Max
+> chose the **continuous-custodian / gardening** job as the right work (build on what's solved), shipped as
+> #22. The deferred unlocks, in order: **perception** (`canvas_read` — content + link graph, scoped) →
+> **authoring** (`canvas_write` — folder-notes/summaries, honoring the no-prose-clobber law). Perception is
+> the single biggest unlock for *meaning-aware* organization.
 
 S30 ran the documented multi-agent flow: Max picks the batch → I write conflict-domain lane briefs → 3 background worktree agents each author ONE PR → I review + verify + merge serially. **main @ `988c317`, build clean, all 10 headless suites pass.** The partition trick that let 3 agents touch the same hot files safely: each lane put its new `AppModel` logic in its **own file** as an `extension AppModel` (same module), so `Model.swift` core was barely touched.
 
@@ -17,6 +26,7 @@ S30 ran the documented multi-agent flow: Max picks the batch → I write conflic
 - **PR #19 — Card polish [serial follow-on, I authored it].** Folder-card hot-path polish: a **Compact Card** context-menu action (`compactCard` → shrink a migration-bloated card to the compact default `folderSize` + reset scroll, children stay put); faint **scroll-overflow thumbs** on an open card; **intra-card connectors clipped** to the card border (`edgeClipScreen` + `CardClip`, cross-boundary edges deferred); **Quick Look peek** anchors to `displayedFrame` (scrolled position). Build + suite verified. Ran inline (single serial lane on the `effectiveFrame`/render path → no parallelism to exploit, and my warm context beat a cold spawn).
 - **PR #20 — Folder-Canvas Phase 3: display spectrum (preview level) [serial, I authored it].** A note gains a middle **preview** rung (title → preview → full): shows its first ~6 lines inline (`BoardNode.preview` + `isPreviewing`, `setPreview`/`togglePreview`, `NodeView.previewBox`/`previewLines`); preview & full are **mutually exclusive**; sized to `previewSize` 220×150 + rides the push solver; context-menu **Show/Hide Preview**. Per-folder view **memory** comes free (the level persists in board.json with `expanded` + `scrollOffset`). **Learned** pre-expansion stays parked (the vision keeps it an open question — no prescriptive auto-expand). `Tests/DisplayLevelTests`.
 - **PR #21 — Cartographer layout-switching [serial, I authored it].** The last open cartographer behavior: `canvas_arrange` gains a `layout` arg — `radial`/`grid`/`columns`, or `auto` (default) which picks from the link topology (`autoLayout`: hub→most spokes ⇒ radial, chain ⇒ columns, else grid). `arrange(hub:spokes:layout:)` shares the Lane-C minimal-motion placement across three slot generators; `arrangeRadialMinimalMotion` is now a shim. All in `MCPServer.swift`'s `extension AppModel`. **Epic A (Agent Cartographer behaviors) now complete** — gravity + minimal-motion + layout-switching. `Tests/ArrangeLayoutTests`.
+- **PR #22 — Cartographer gardening infra [serial, I authored it].** Defines the agent's right work as a *continuous custodian*. New read-only **`canvas_health`** — structural drift signals (orphans / crowded folders / overlapping siblings / visual-only connectors) the agent reads to decide what to tidy, then acts with arrange/move/link/collapse. **`canvas_get` gains `depth` + `maxNodes`** (scoped, paginated, `truncated`/`totalInScope`) for big-vault reads. All in `MCPServer.swift`'s `extension AppModel`. `Tests/BoardHealthTests`.
 
 > ⚠️ **OWE MAX A VISUAL PASS** (batched per the review workflow — headless + build verified, UI not eyeballed):
 > - **A:** ⌘P opens the palette; typing filters + ranks; Enter pans-to + selects; Esc / scrim-click closes.
@@ -27,6 +37,8 @@ S30 ran the documented multi-agent flow: Max picks the batch → I write conflic
 > - **Layout-switching (#21, via MCP):** `canvas_arrange` `layout:"grid"`/`"columns"`/`"radial"` shape correctly; `"auto"` (or omitted) picks radial for a hub-and-spoke, columns for a chain, grid for a flat set; re-running a tidy layout moves nothing (minimal-motion).
 
 **▶ NEXT BUILD options:**
+- **The agent gardening loop** (natural payoff of #22): wire a headless agent that runs `canvas_health` → tidies the worst signals (arrange crowded folders, push apart overlaps, cluster orphans) → `canvas_screenshot` to self-check → repeat. Turns the new diagnostic into an actual custodian pass; verify VIEW-ONLY on a throwaway vault first.
+- **Perception — `canvas_read`** (the biggest unlock): scoped/paginated note content + link graph, so the agent can organize by *meaning* (content-aware health, semantic linking), not just structure. Then **authoring — `canvas_write`** (folder-notes/summaries via the managed block, honoring no-prose-clobber).
 - **Phase 3 remainders** (lower priority): **learned** pre-expansion is still parked (open question — open-count/recency/dwell, pre-expand vs suggest); a unified spectrum-cycling control (one affordance for title→preview→full) instead of the two menu items.
 - **More parallel quick-wins** (next batch): collapsed-folder header truncation fix · arrow-key nudge · remember-viewport-per-vault · Open-in-Obsidian deep link.
 

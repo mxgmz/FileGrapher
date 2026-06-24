@@ -31,6 +31,16 @@ Scrum-style board. **Status legend:** ✅ done · 🔄 in progress · ⬜ todo �
   columns, else grid). `arrange(hub:spokes:layout:)` shares minimal-motion placement over three slot
   generators; `arrangeRadialMinimalMotion` is now a shim. `Tests/ArrangeLayoutTests`. **→ Epic A cartographer
   behaviors complete: gravity + minimal-motion + layout-switching.**
+- ✅ **Gardening infra (S30, PR #22)** — the agent as a *continuous custodian* (the chosen "right work").
+  Read-only **`canvas_health`** surfaces structural drift (orphans / crowded folders / overlapping siblings /
+  visual-only connectors); **`canvas_get` gains `depth` + `maxNodes`** (scoped, paginated, `truncated`/
+  `totalInScope`) for big-vault reads. `Tests/BoardHealthTests`.
+- ⬜ **The agent gardening loop** — wire a headless agent: `canvas_health` → tidy (arrange/push/cluster) →
+  `canvas_screenshot` self-check → repeat. The custodian pass that turns the diagnostic into action.
+- ⬜ **Perception (`canvas_read`)** then **authoring (`canvas_write`)** — the deferred unlocks for *meaning-
+  aware* organization + synthesis. `canvas_get` is structure-only today; agents can't read or write note
+  content. Perception is the single biggest unlock (content-aware health, semantic linking). Authoring must
+  honor the no-prose-clobber law (managed `<!-- canvas-links -->` block / folder-notes / `saveFileContent`).
 
 ### Epic B — Folders Are Canvases (the spatial foundation)
 **Specs:** `VISION-folder-canvas.md` + `SPEC-folder-canvas.md`. **Specced, not built.** Prereq for proper
