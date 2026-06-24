@@ -1957,7 +1957,9 @@ final class AppModel: ObservableObject {
     }
 
     /// Run a mutating action as a single undoable transaction (nestable).
-    private func transaction(_ body: () -> Void) {
+    /// Internal (not private) so sibling-file extensions like `FinderImport` can group their own
+    /// board + disk mutations into one undo step using the same engine.
+    func transaction(_ body: () -> Void) {
         if txnDepth == 0 { txnBefore = board; txnFileUndo = []; txnFileRedo = [] }
         txnDepth += 1
         body()
@@ -2047,6 +2049,22 @@ final class AppModel: ObservableObject {
         rawCopy(from, to)
         txnFileRedo.append { self.rawCopy(from, to) }
         txnFileUndo.append { _ = self.rawTrash(to) }
+    }
+
+    /// Copy a file/folder from OUTSIDE the vault (a Finder drag-in) to vault-relative `to`, recursively,
+    /// and register the inverse (trash the copy on undo). Like `tCopy`, but the source is an absolute URL
+    /// rather than an in-vault path. Internal so the `FinderImport` sibling-file extension can reuse it.
+    /// Must run inside a `transaction`.
+    func tImport(from externalSource: URL, to rel: String) {
+        guard let vault else { return }
+        markSelfWrite(rel)
+        let parent = (rel as NSString).deletingLastPathComponent
+        if !parent.isEmpty {
+            try? FileManager.default.createDirectory(at: vault.url(parent), withIntermediateDirectories: true)
+        }
+        try? FileManager.default.copyItem(at: externalSource, to: vault.url(rel))
+        txnFileRedo.append { try? FileManager.default.copyItem(at: externalSource, to: vault.url(rel)) }
+        txnFileUndo.append { _ = self.rawTrash(rel) }
     }
     private func tTrash(_ rel: String) {
         var url = rawTrash(rel)
