@@ -73,7 +73,15 @@ folder-organization + smart expansion. Phasing is risk-ordered:
       **connectors clipped** to the card border (`edgeClipScreen`/`CardClip`), and **Quick Look peek** anchored
       to `displayedFrame` (scrolled position). Build + suite verified; UI eyeball owed. *Deferred ceiling:
       cross-card-boundary edges aren't clipped.*
-- ⬜ **Phase 3 — Smart expansion**. Per-folder view memory; title→preview→full spectrum; learned pre-expand.
+- 🔄 **Phase 3 — Smart expansion.**
+  - ✅ **Display spectrum (S30, PR #20)** — notes gain a middle **preview** level (first ~6 lines inline;
+    `BoardNode.preview`/`isPreviewing`, `setPreview`/`togglePreview`, `NodeView.previewBox`; preview↔full
+    mutually exclusive; sized to `previewSize` + push; context-menu Show/Hide Preview). `Tests/DisplayLevelTests`.
+  - ✅ **Per-folder view memory** — free: the display level persists in board.json alongside `expanded` +
+    `scrollOffset`, so a folder reopens how you left it.
+  - ⏸️ **Learned pre-expand** — parked (the vision keeps it an open question — open-count/recency/dwell,
+    pre-expand vs suggest; no prescriptive auto-expand).
+  - ⬜ *Nice-to-have:* a unified spectrum-cycling control (one affordance for title→preview→full).
 
 ---
 

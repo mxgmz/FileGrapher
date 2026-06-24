@@ -5,7 +5,7 @@ open questions. At a session's start, read the top entry to pick up where we lef
 
 ---
 
-## ▶ NEXT SESSION — START HERE · S30 — **3 parallel lanes + card polish SHIPPED. Next: Phase 3 (smart expansion) or more parallel quick-wins.**
+## ▶ NEXT SESSION — START HERE · S30 — **3 parallel lanes + card polish + Phase 3 preview-level SHIPPED. Next: parallel quick-wins, or Phase 3 "learned" (parked) / cartographer layout-switching.**
 
 S30 ran the documented multi-agent flow: Max picks the batch → I write conflict-domain lane briefs → 3 background worktree agents each author ONE PR → I review + verify + merge serially. **main @ `988c317`, build clean, all 10 headless suites pass.** The partition trick that let 3 agents touch the same hot files safely: each lane put its new `AppModel` logic in its **own file** as an `extension AppModel` (same module), so `Model.swift` core was barely touched.
 
@@ -15,15 +15,18 @@ S30 ran the documented multi-agent flow: Max picks the batch → I write conflic
 - **PR #18 — Cartographer gravity + minimal-motion [Lane C].** Gravity (VISION §4): a note's *first* link pulls it beside its kin (`placeNearKin` via `nearestFreeCenter`). Minimal-motion: `canvas_arrange` skips spokes already within `arrangeSettleRadius` (24pt) of their slot (re-run on a tidy hub = no-op), nearest-slot pairing. All in `MCPServer.swift` (`extension AppModel`). `Tests/CartographerGravityTests`.
 - **One shared edit:** `transaction(_:)` widened `private`→`internal` (both B & C needed it for their sibling-file extensions). The only merge conflict — trivial, resolved into one combined comment at C's merge.
 - **PR #19 — Card polish [serial follow-on, I authored it].** Folder-card hot-path polish: a **Compact Card** context-menu action (`compactCard` → shrink a migration-bloated card to the compact default `folderSize` + reset scroll, children stay put); faint **scroll-overflow thumbs** on an open card; **intra-card connectors clipped** to the card border (`edgeClipScreen` + `CardClip`, cross-boundary edges deferred); **Quick Look peek** anchors to `displayedFrame` (scrolled position). Build + suite verified. Ran inline (single serial lane on the `effectiveFrame`/render path → no parallelism to exploit, and my warm context beat a cold spawn).
+- **PR #20 — Folder-Canvas Phase 3: display spectrum (preview level) [serial, I authored it].** A note gains a middle **preview** rung (title → preview → full): shows its first ~6 lines inline (`BoardNode.preview` + `isPreviewing`, `setPreview`/`togglePreview`, `NodeView.previewBox`/`previewLines`); preview & full are **mutually exclusive**; sized to `previewSize` 220×150 + rides the push solver; context-menu **Show/Hide Preview**. Per-folder view **memory** comes free (the level persists in board.json with `expanded` + `scrollOffset`). **Learned** pre-expansion stays parked (the vision keeps it an open question — no prescriptive auto-expand). `Tests/DisplayLevelTests`.
 
 > ⚠️ **OWE MAX A VISUAL PASS** (batched per the review workflow — headless + build verified, UI not eyeballed):
 > - **A:** ⌘P opens the palette; typing filters + ranks; Enter pans-to + selects; Esc / scrim-click closes.
 > - **B:** drop a `.md` on empty canvas → file appears in the vault + box at the drop point; drop onto a folder → filed inside; drop a folder → boxed with children; **one ⌘Z reverses box + file**.
 > - **C:** (needs the live MCP server) create + link a note → it lands beside its kin; re-`canvas_arrange` a tidy hub → nothing twitches.
 > - **Card polish (#19):** Compact Card shrinks a bloated folder (one ⌘Z restores the size); an open card with overflow shows faint scroll thumbs; an intra-card connector clips at the card border; Quick Look on a scrolled child opens beside its drawn position.
+> - **Phase 3 preview (#20):** right-click a note → Show Preview → first lines show inline + neighbors push aside; Expand Card / Show Preview / Hide Preview cycle exclusively; one ⌘Z per transition; the preview level survives quit/reopen.
 
 **▶ NEXT BUILD options:**
-- **Phase 3 — smart expansion** (per-folder view memory, title→preview→full spectrum, learned pre-expand) — the next big folder-canvas step (serial; hot path).
+- **Phase 3 remainders** (lower priority): **learned** pre-expansion is still parked (open question — open-count/recency/dwell, pre-expand vs suggest); a unified spectrum-cycling control (one affordance for title→preview→full) instead of the two menu items.
+- **Cartographer layout-switching** (radial/columns/grid per topology) — the last open cartographer behavior.
 - **More parallel quick-wins** (next batch): collapsed-folder header truncation fix · arrow-key nudge · remember-viewport-per-vault · Open-in-Obsidian deep link.
 
 ---
