@@ -72,18 +72,20 @@ func union(_ a: (minX: Double, minY: Double, width: Double, height: Double),
 }
 
 // ported from AppModel.legacyAutoGrownFrame — the OLD auto-grow footprint (no outlier filter in this
-// fixture: every child is near its siblings, so autoGrowChildren == all children).
-func legacyAutoGrownFrame(of node: Node, in nodes: [Node]) -> (minX: Double, minY: Double, width: Double, height: Double) {
+// fixture: every child is near its siblings, so autoGrowChildren == all children). `asOpenCard` forces
+// the TOP folder open even when collapsed (the seed wants its content extent, not its header strip);
+// nested children always recurse with asOpenCard:false, so a collapsed CHILD contributes only its header.
+func legacyAutoGrownFrame(of node: Node, in nodes: [Node], asOpenCard: Bool = false) -> (minX: Double, minY: Double, width: Double, height: Double) {
     guard node.kind == "folder" else { return worldFrame(of: node, in: nodes) }
-    if node.collapsed {
+    if node.collapsed && !asOpenCard {
         let wf = worldFrame(of: node, in: nodes)
         return (wf.minX, wf.minY, min(wf.width, collapsedFolderWidth), folderHeaderHeight)
     }
     var frame = worldFrame(of: node, in: nodes)
     let children = directChildren(of: node.relPath, in: nodes)
     if let first = children.first {
-        var bounds = legacyAutoGrownFrame(of: first, in: nodes)
-        for child in children.dropFirst() { bounds = union(bounds, legacyAutoGrownFrame(of: child, in: nodes)) }
+        var bounds = legacyAutoGrownFrame(of: first, in: nodes, asOpenCard: false)
+        for child in children.dropFirst() { bounds = union(bounds, legacyAutoGrownFrame(of: child, in: nodes, asOpenCard: false)) }
         let needed = (minX: bounds.minX - folderPadding,
                       minY: bounds.minY - folderPadding - folderHeaderHeight,
                       width: bounds.width + 2 * folderPadding,
@@ -99,8 +101,10 @@ func legacyAutoGrownFrame(of node: Node, in nodes: [Node]) -> (minX: Double, min
 // worldCenter must read the current board, never a stale pre-loop copy — this is the subtle bit).
 func seedFolderCards(_ nodes: inout [Node]) {
     let folderIDs = nodes.filter { $0.kind == "folder" }.map { $0.id }
+    // asOpenCard:true so a COLLAPSED folder seeds its OPEN content extent (the size it must expand back
+    // to), not its collapsed header strip.
     let grown = Dictionary(uniqueKeysWithValues:
-        nodes.filter { $0.kind == "folder" }.map { ($0.id, legacyAutoGrownFrame(of: $0, in: nodes)) })
+        nodes.filter { $0.kind == "folder" }.map { ($0.id, legacyAutoGrownFrame(of: $0, in: nodes, asOpenCard: true)) })
     for id in folderIDs {
         guard let index = nodes.firstIndex(where: { $0.id == id }), let target = grown[id] else { continue }
         let folder = nodes[index]
@@ -118,17 +122,26 @@ func seedFolderCards(_ nodes: inout [Node]) {
 
 // 2-level-nested fixture (already v2 / relative coords). Children placed ASYMMETRICALLY so the
 // auto-grown frame is genuinely off-center from each folder's stored center.
-//   root F  (folder) at world (1000,1000), small stored frame
+//   root F  (folder, OPEN) at world (1000,1000), small stored frame
 //     note B1, note B2  (both inside F, pushed to one side)
-//     subfolder G       (inside F, off to a corner)
+//     subfolder G       (inside F, OPEN, off to a corner)
 //       note D1, note D2 (inside G, pushed to one side — depth 2)
+//   root C  (folder, COLLAPSED) — its card must seed to its OPEN extent, not the header strip
+//     note P1, note P2  (inside C, pushed to one side)
+//     subfolder K       (inside C, COLLAPSED — contributes ONLY its collapsed header to C's footprint)
+//       note Q1         (inside K — hidden; would balloon K's open frame, must NOT reach C)
 var nodes = [
-    Node(id: 1, relPath: "F",          kind: "folder", x: 1000, y: 1000, width: 200, height: 140),
-    Node(id: 2, relPath: "F/B1.md",    kind: "note",   x:  300, y:   80, width: 180, height: 110),  // rel to F
-    Node(id: 3, relPath: "F/B2.md",    kind: "note",   x:  520, y:  240, width: 180, height: 110),  // rel to F
-    Node(id: 4, relPath: "F/G",        kind: "folder", x:  600, y:  500, width: 200, height: 140),  // rel to F
-    Node(id: 5, relPath: "F/G/D1.md",  kind: "note",   x:  160, y:   40, width: 160, height: 100),  // rel to G
-    Node(id: 6, relPath: "F/G/D2.md",  kind: "note",   x:  340, y:  220, width: 160, height: 100),  // rel to G
+    Node(id:  1, relPath: "F",          kind: "folder", x: 1000, y: 1000, width: 200, height: 140),
+    Node(id:  2, relPath: "F/B1.md",    kind: "note",   x:  300, y:   80, width: 180, height: 110),  // rel to F
+    Node(id:  3, relPath: "F/B2.md",    kind: "note",   x:  520, y:  240, width: 180, height: 110),  // rel to F
+    Node(id:  4, relPath: "F/G",        kind: "folder", x:  600, y:  500, width: 200, height: 140),  // rel to F
+    Node(id:  5, relPath: "F/G/D1.md",  kind: "note",   x:  160, y:   40, width: 160, height: 100),  // rel to G
+    Node(id:  6, relPath: "F/G/D2.md",  kind: "note",   x:  340, y:  220, width: 160, height: 100),  // rel to G
+    Node(id:  7, relPath: "C",          kind: "folder", x: 4000, y: 1000, width: 340, height: 230, collapsed: true),
+    Node(id:  8, relPath: "C/P1.md",    kind: "note",   x:  280, y:  120, width: 180, height: 110),  // rel to C
+    Node(id:  9, relPath: "C/P2.md",    kind: "note",   x:  470, y:  260, width: 180, height: 110),  // rel to C
+    Node(id: 10, relPath: "C/K",        kind: "folder", x:  150, y:  420, width: 200, height: 140, collapsed: true),  // rel to C
+    Node(id: 11, relPath: "C/K/Q1.md",  kind: "note",   x: 1200, y: 1200, width: 160, height: 100),  // rel to K — far, would balloon K if open
 ]
 
 var failures = 0
@@ -136,17 +149,39 @@ func check(_ name: String, _ pass: Bool) { print((pass ? "ok   " : "FAIL ") + na
 func close(_ a: Double, _ b: Double) -> Bool { abs(a - b) < 1e-6 }
 func eqPoint(_ a: (x: Double, y: Double), _ b: (x: Double, y: Double)) -> Bool { close(a.x, b.x) && close(a.y, b.y) }
 
-// Snapshot the PRE-seed truth: every node's world center, and every folder's auto-grown footprint.
+// Snapshot the PRE-seed truth: every node's world center, and every folder's OPEN-card footprint (the
+// same `asOpenCard:true` the seed uses, so a collapsed folder's target is its content extent).
 let worldBefore = Dictionary(uniqueKeysWithValues: nodes.map { ($0.id, worldCenter(of: $0, in: nodes)) })
 let grownBefore = Dictionary(uniqueKeysWithValues:
-    nodes.filter { $0.kind == "folder" }.map { ($0.id, legacyAutoGrownFrame(of: $0, in: nodes)) })
+    nodes.filter { $0.kind == "folder" }.map { ($0.id, legacyAutoGrownFrame(of: $0, in: nodes, asOpenCard: true)) })
 
-// Sanity: the fixture's auto-grown frames really are off-center (otherwise the test proves nothing).
+// Sanity: the fixture's open footprints really are off-center (otherwise the test proves nothing).
 for folder in nodes where folder.kind == "folder" {
     let g = grownBefore[folder.id]!
     let stored = worldBefore[folder.id]!
-    check("fixture: \(folder.relPath) auto-grown frame is OFF-center from its stored center",
+    check("fixture: \(folder.relPath) open footprint is OFF-center from its stored center",
           abs((g.minX + g.width / 2) - stored.x) > 1 || abs((g.minY + g.height / 2) - stored.y) > 1)
+}
+
+// Sanity: the COLLAPSED top folder C's open footprint is genuinely bigger than its collapsed header strip
+// (else "seed to open extent, not header" would be vacuous — this is exactly the recordentaln8n bug).
+do {
+    let c = nodes.first { $0.relPath == "C" }!
+    let open = grownBefore[c.id]!
+    let header = legacyAutoGrownFrame(of: c, in: nodes, asOpenCard: false)   // collapsed → header strip
+    check("fixture: collapsed C's open footprint is larger than its collapsed header (220x40)",
+          open.width > header.width + 1 && open.height > header.height + 1
+          && close(header.width, min(c.width, collapsedFolderWidth)) && close(header.height, folderHeaderHeight))
+}
+
+// Sanity: collapsed child K's far note Q1 (rel 1200,1200) WOULD balloon K's open frame, but because K is
+// collapsed it contributes only its header to C — so C's open footprint must NOT reach Q1's world position.
+do {
+    let c = nodes.first { $0.relPath == "C" }!, q1 = nodes.first { $0.relPath == "C/K/Q1.md" }!
+    let cOpen = grownBefore[c.id]!
+    let q1World = worldCenter(of: q1, in: nodes)
+    check("fixture: collapsed child K's hidden note Q1 is FAR outside C's open footprint (proves K folds to its header)",
+          q1World.x > cOpen.minX + cOpen.width + 100)
 }
 
 seedFolderCards(&nodes)
@@ -159,14 +194,32 @@ for node in nodes where node.kind == "note" {
           eqPoint(worldCenter(of: node, in: nodes), worldBefore[node.id]!))
 }
 
-// 2: each folder's post-seed worldFrame == its pre-seed auto-grown frame — including the depth-2-parent
-// subfolder G. This is the folder's "rendered footprint unchanged", and it composes correctly only when
-// the seed re-reads each folder's live (already counter-shifted) center, not a stale snapshot.
+// 2: each folder's post-seed worldFrame == its pre-seed OPEN footprint — including the depth-2-parent
+// subfolder G, AND the collapsed folders C and K (their CARD is the open extent, even though they still
+// render collapsed via effectiveFrame→collapsedFrame at runtime). Composes correctly only when the seed
+// re-reads each folder's live (already counter-shifted) center, not a stale snapshot.
 for node in nodes where node.kind == "folder" {
     let wf = worldFrame(of: node, in: nodes)
     let g = grownBefore[node.id]!
-    check("worldFrame(\(node.relPath)) == grown[\(node.relPath)] after seed",
+    check("worldFrame(\(node.relPath)) == open footprint after seed",
           close(wf.minX, g.minX) && close(wf.minY, g.minY) && close(wf.width, g.width) && close(wf.height, g.height))
+}
+
+// 2a (the recordentaln8n bug): a COLLAPSED folder's seeded card size == its OPEN footprint, NOT the
+// collapsed-header strip (220x40). Otherwise expanding it later yields a card too tiny to hold its kids.
+do {
+    let c = nodes.first { $0.relPath == "C" }!, g = grownBefore[c.id]!
+    check("collapsed C seeded card size == its OPEN footprint (not 220x40 header)",
+          close(c.width, g.width) && close(c.height, g.height)
+          && (c.width > collapsedFolderWidth + 1 || c.height > folderHeaderHeight + 1))
+}
+
+// 2b: a COLLAPSED child (K, inside open-card C) contributes only its collapsed header to C's footprint —
+// its hidden far note Q1 never widened C. So C's seeded card stays modest, not ballooned out to Q1.
+do {
+    let c = nodes.first { $0.relPath == "C" }!
+    check("collapsed child K folded to its header inside C — C's card not ballooned by K's hidden note",
+          c.width < 2000 && c.height < 2000)
 }
 
 // 3: idempotency — the seed is a FIXED POINT. Re-running it on the already-seeded board moves nothing:

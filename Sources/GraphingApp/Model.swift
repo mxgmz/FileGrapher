@@ -514,9 +514,11 @@ final class AppModel: ObservableObject {
     func seedFolderCardsIfNeeded() -> Bool {
         guard board.version < 3 else { return false }
         let folderIDs = board.nodes.filter { $0.kind == .folder }.map { $0.id }
-        // Snapshot the OLD auto-grown footprint of every folder on the CURRENT board, before any move.
+        // Snapshot each folder's OPEN auto-grown footprint on the CURRENT board, before any move. Open
+        // (asOpenCard) so a COLLAPSED folder's card is seeded to its content extent — the size it must
+        // expand back to — not its collapsed header strip (which would render fine but expand to nothing).
         let grown = Dictionary(uniqueKeysWithValues:
-            board.nodes.filter { $0.kind == .folder }.map { ($0.id, legacyAutoGrownFrame(of: $0)) })
+            board.nodes.filter { $0.kind == .folder }.map { ($0.id, legacyAutoGrownFrame(of: $0, asOpenCard: true)) })
         // Iterate by id and re-read the LIVE node each pass: a folder may already have been counter-shifted
         // by its parent's seed, so `worldCenter` must read the current board, never a stale pre-loop copy.
         for id in folderIDs {
@@ -1616,14 +1618,19 @@ final class AppModel: ObservableObject {
     /// auto-grown frames (plus padding + header), collapsed folders short-circuiting to their header.
     /// A faithful replica of the pre-Phase-2 `effectiveFrame` behavior, kept ONLY so the v2→v3 seed
     /// migration can snapshot what each folder used to display before retiring auto-grow.
-    func legacyAutoGrownFrame(of node: BoardNode) -> CGRect {
+    ///
+    /// `asOpenCard` forces the TOP folder open even when it's collapsed: the seed needs a folder's OPEN
+    /// content extent for its card size (the size it must expand back to), which is distinct from its
+    /// collapsed *rendering* (`effectiveFrame` → `collapsedFrame`, the header strip). Nested children
+    /// still reflect their own actual collapse state, so a collapsed child contributes only its header.
+    func legacyAutoGrownFrame(of node: BoardNode, asOpenCard: Bool = false) -> CGRect {
         var visited = Set<String>()
-        return legacyAutoGrownFrame(of: node, visited: &visited, depth: 0)
+        return legacyAutoGrownFrame(of: node, visited: &visited, depth: 0, asOpenCard: asOpenCard)
     }
 
-    private func legacyAutoGrownFrame(of node: BoardNode, visited: inout Set<String>, depth: Int) -> CGRect {
+    private func legacyAutoGrownFrame(of node: BoardNode, visited: inout Set<String>, depth: Int, asOpenCard: Bool) -> CGRect {
         guard node.kind == .folder else { return worldFrame(of: node) }
-        if node.isCollapsedFolder { return collapsedFrame(of: node) }
+        if node.isCollapsedFolder && !asOpenCard { return collapsedFrame(of: node) }
         guard depth < AppModel.maxFolderDepth, visited.insert(node.relPath).inserted else {
             warnFolderCycle(at: node.relPath, depth: depth)
             return worldFrame(of: node)
@@ -1631,9 +1638,11 @@ final class AppModel: ObservableObject {
         var frame = worldFrame(of: node)
         let children = autoGrowChildren(of: node)   // exclude far-flung outliers so one box can't balloon the folder
         if !children.isEmpty {
-            var bounds = legacyAutoGrownFrame(of: children[0], visited: &visited, depth: depth + 1)
+            // Children recurse with asOpenCard:false — a collapsed CHILD still contributes only its
+            // collapsed header to the parent's footprint (it's the open extent OF THE TOP folder we want).
+            var bounds = legacyAutoGrownFrame(of: children[0], visited: &visited, depth: depth + 1, asOpenCard: false)
             for child in children.dropFirst() {
-                bounds = bounds.union(legacyAutoGrownFrame(of: child, visited: &visited, depth: depth + 1))
+                bounds = bounds.union(legacyAutoGrownFrame(of: child, visited: &visited, depth: depth + 1, asOpenCard: false))
             }
             let pad = AppModel.folderPadding
             let needed = CGRect(x: bounds.minX - pad,
