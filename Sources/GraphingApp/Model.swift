@@ -1957,7 +1957,9 @@ final class AppModel: ObservableObject {
     }
 
     /// Run a mutating action as a single undoable transaction (nestable).
-    private func transaction(_ body: () -> Void) {
+    /// Module-internal (not `private`) so same-module cartographer extensions (MCPServer.swift) can bundle
+    /// their mutations into one ⌘Z step — the same guarantee every UI mutation already gets.
+    func transaction(_ body: () -> Void) {
         if txnDepth == 0 { txnBefore = board; txnFileUndo = []; txnFileRedo = [] }
         txnDepth += 1
         body()
