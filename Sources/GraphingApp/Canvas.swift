@@ -168,8 +168,9 @@ struct CanvasView: View {
         let world = CGRect(x: tl.x, y: tl.y, width: br.x - tl.x, height: br.y - tl.y)
         var hit = marqueeBase
         let hidden = model.hiddenNodeIds
+        // Hit-test the DRAWN frame (scrolled children draw shifted) so the marquee selects what's visible.
         for n in model.board.nodes
-            where !hidden.contains(n.id) && model.effectiveFrame(of: n).intersects(world) {
+            where !hidden.contains(n.id) && model.displayedFrame(of: n).intersects(world) {
             hit.insert(n.id)
         }
         model.selection = hit
@@ -219,17 +220,31 @@ struct CanvasView: View {
             // at the start of a continuous trackpad gesture and hold it until the gesture ends.
             let w = model.screenToWorld(local)
             let overCardNow = model.peekId != nil
-                || model.board.nodes.contains { $0.isExpanded && model.effectiveFrame(of: $0).contains(w) }
+                || model.board.nodes.contains { $0.isExpanded && model.displayedFrame(of: $0).contains(w) }
             let isGesture = !event.phase.isEmpty || !event.momentumPhase.isEmpty
             if event.phase.contains(.began) { model.scrollOverCard = overCardNow }
             // Trackpad gesture (incl. its momentum) follows the lock; a legacy wheel hit-tests live.
             let routeToCard = isGesture ? (model.scrollOverCard ?? overCardNow) : overCardNow
+            // Over an OPEN folder's interior, a (non-⌘) scroll pans that folder's children inside its
+            // card, not the canvas. Locked for the gesture like the card route, so a swipe doesn't hop
+            // folders mid-stroke. ⌘-scroll always zooms; a card route wins (cards sit on top).
+            let folderNow = (routeToCard || event.modifierFlags.contains(.command))
+                ? nil : model.scrollTargetFolder(at: w)?.id
+            if event.phase.contains(.began) { model.scrollFolderTarget = folderNow }
+            let folderTarget = isGesture ? (model.scrollFolderTarget ?? folderNow) : folderNow
             if event.momentumPhase.contains(.ended) || event.phase.contains(.cancelled) {
                 model.scrollOverCard = nil
+                model.scrollFolderTarget = nil
             }
             if routeToCard { return event }   // let the card / peek scroll natively
             if event.modifierFlags.contains(.command) {
                 model.zoomToward(local, factor: 1 - event.scrollingDeltaY * 0.0025)
+            } else if let folderTarget {
+                let mult: CGFloat = event.hasPreciseScrollingDeltas ? 1 : 16
+                // Scroll content the natural way: pushing up (negative deltaY) reveals lower content,
+                // i.e. shifts children up — the offset moves with the delta, in world units (÷ zoom).
+                model.scrolledFolder(folderTarget, by: CGSize(width: event.scrollingDeltaX * mult / model.zoom,
+                                                              height: event.scrollingDeltaY * mult / model.zoom))
             } else {
                 let mult: CGFloat = event.hasPreciseScrollingDeltas ? 1 : 16
                 model.pan.width += event.scrollingDeltaX * mult
@@ -342,9 +357,10 @@ struct CanvasView: View {
 
     // MARK: Edges
 
-    /// A node's displayed (auto-grown) frame in screen space.
+    /// A node's drawn frame in screen space (its world card frame plus any scrolled-ancestor offset),
+    /// so connectors and handles anchor to where the box actually renders inside a scrolled folder.
     private func screenRect(_ node: BoardNode) -> CGRect {
-        let f = model.effectiveFrame(of: node)
+        let f = model.displayedFrame(of: node)
         let c = model.worldToScreen(CGPoint(x: f.midX, y: f.midY))
         let w = f.width * model.zoom, h = f.height * model.zoom
         return CGRect(x: c.x - w / 2, y: c.y - h / 2, width: w, height: h)
@@ -445,10 +461,16 @@ struct CanvasView: View {
 
     private func placed(_ node: BoardNode) -> some View {
         let f = model.effectiveFrame(of: node)
+        // A child of an OPEN folder rides its ancestors' scroll offset, so it draws at its world frame
+        // shifted by renderOffset — and is masked to its folder card's interior window so overflow is
+        // clipped away (the card is a scroll viewport). A root box has zero offset and no clip.
+        let shift = model.renderOffset(of: node)
+        let center = model.worldToScreen(CGPoint(x: f.midX + shift.width, y: f.midY + shift.height))
         // No .scaleEffect: NodeView renders itself in screen space (every dimension × zoom) so
         // text stays crisp vector glyphs at any zoom / font size instead of an upscaled bitmap.
         return NodeView(node: node, displayFrame: f)
-            .position(model.worldToScreen(CGPoint(x: f.midX, y: f.midY)))
+            .position(center)
+            .modifier(CardClip(window: model.clipWindow(of: node).map(model.worldRectToScreen)))
             .transition(.scale(scale: 0.7).combined(with: .opacity))
     }
 
@@ -457,7 +479,7 @@ struct CanvasView: View {
     @ViewBuilder
     private var pendingConnector: some View {
         if let pc = model.pendingConnect, let src = model.node(pc.from) {
-            let f = model.effectiveFrame(of: src)
+            let f = model.displayedFrame(of: src)
             let start = model.worldToScreen(CGPoint(x: f.midX, y: f.midY))
             ZStack {
                 Path { p in
@@ -467,7 +489,7 @@ struct CanvasView: View {
                 .stroke(Color.accentColor.opacity(0.85),
                         style: StrokeStyle(lineWidth: 2.5, lineCap: .round, dash: [6, 4]))
                 if let t = pc.hoverTarget, let tn = model.node(t) {
-                    let tf = model.effectiveFrame(of: tn)
+                    let tf = model.displayedFrame(of: tn)
                     let c = model.worldToScreen(CGPoint(x: tf.midX, y: tf.midY))
                     RoundedRectangle(cornerRadius: GappStyle.cornerRadius * model.zoom)
                         .stroke(Color.accentColor, lineWidth: 3)
@@ -483,7 +505,7 @@ struct CanvasView: View {
     @ViewBuilder
     private var dropTargetOutline: some View {
         if let id = model.dropTargetId, let folder = model.node(id) {
-            let f = model.effectiveFrame(of: folder)
+            let f = model.displayedFrame(of: folder)
             RoundedRectangle(cornerRadius: GappStyle.cornerRadius * model.zoom)
                 .stroke(Color.accentColor, style: StrokeStyle(lineWidth: 3, dash: [7, 4]))
                 .frame(width: f.width * model.zoom, height: f.height * model.zoom)
@@ -501,7 +523,7 @@ struct CanvasView: View {
            let node = model.node(id),
            model.editingId != id,
            model.zoom >= gappChromeMinZoom {   // far zoom-out: outline only, no piled-up handles (T3)
-            let f = model.effectiveFrame(of: node)
+            let f = model.displayedFrame(of: node)
             let center = model.worldToScreen(CGPoint(x: f.midX, y: f.midY))
             let halfW = f.width / 2 * model.zoom
             let halfH = f.height / 2 * model.zoom
@@ -1334,9 +1356,11 @@ struct NodeView: View {
     private func applyInteriorMarquee() {
         guard let r = interiorMarquee else { return }
         // Interior-local screen rect → world rect (the interior starts headerHeight below the box top),
-        // then select the folder's children it intersects.
-        let topLeft = CGPoint(x: displayFrame.minX + r.minX / scale,
-                              y: displayFrame.minY + headerHeight + r.minY / scale)
+        // then select the folder's children it intersects. Children draw shifted by this folder's own
+        // scroll, so un-shift the marquee back into their un-scrolled frame space before testing.
+        let scroll = node.scroll
+        let topLeft = CGPoint(x: displayFrame.minX + r.minX / scale - scroll.width,
+                              y: displayFrame.minY + headerHeight + r.minY / scale - scroll.height)
         let world = CGRect(x: topLeft.x, y: topLeft.y, width: r.width / scale, height: r.height / scale)
         var hit = interiorMarqueeBase
         for child in model.directChildren(of: node.relPath)
@@ -1433,8 +1457,10 @@ struct NodeView: View {
         // `local` is in the box's scaled (screen) space; divide by scale to get content units.
         let cx = local.x / scale, cy = local.y / scale
         if node.kind == .folder, cy > headerHeight {
-            // Double-click the folder's interior -> a note inside it, where you clicked.
-            let world = CGPoint(x: displayFrame.minX + cx, y: displayFrame.minY + cy)
+            // Double-click the folder's interior -> a note inside it, where you clicked. The interior is
+            // scrolled by this folder's offset, so un-shift the click back to its un-scrolled world point.
+            let world = CGPoint(x: displayFrame.minX + cx - node.scroll.width,
+                                y: displayFrame.minY + cy - node.scroll.height)
             withAnimation(gappSpring) { _ = model.addNote(inDir: node.relPath, at: world) }
         } else {
             model.editingId = node.id
@@ -1495,6 +1521,26 @@ struct NodeView: View {
                 if multi || root == nil { model.endInteraction() }
                 else if let root { model.endDrag(root, at: model.worldFromGlobal(v.location)) }
             }
+    }
+}
+
+/// Clips a node to its open-folder card's interior window (a screen rect), so content overflowing a
+/// shrunk folder card is hidden until scrolled into view. `nil` window == a root box, never clipped.
+/// The mask rectangle is positioned in the same coordinate space the node is `.position`ed in (the
+/// `world` ZStack), so it lines up exactly with the card on screen.
+private struct CardClip: ViewModifier {
+    let window: CGRect?
+
+    func body(content: Content) -> some View {
+        if let window {
+            content.mask(
+                Rectangle()
+                    .frame(width: max(0, window.width), height: max(0, window.height))
+                    .position(x: window.midX, y: window.midY)
+            )
+        } else {
+            content
+        }
     }
 }
 

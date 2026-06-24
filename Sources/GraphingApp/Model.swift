@@ -105,12 +105,19 @@ struct BoardNode: Identifiable, Codable, Equatable {
     var cardSize: CGSize?        // remembered expanded-card size, so it survives collapse/re-expand
     var fileId: UInt64?          // disk inode — lets syncFromDisk follow a box to a file's new path
     var pinned: Bool?            // anchored: can't be dragged, and collision push never moves it; nil/false == free
+    var scrollOffset: CGSize?    // open folder: how far its interior is scrolled (nil == .zero), a transient view nudge
 
     /// True when this box is showing content inline as a card (notes, and folders via their folder-note).
     var isExpanded: Bool { expanded ?? false }
 
     /// True when this folder is collapsed (children hidden, frame shrunk to its header).
     var isCollapsedFolder: Bool { kind == .folder && (collapsed ?? false) }
+
+    /// True when this folder is OPEN — its interior children show and scroll inside its card.
+    var isOpenFolder: Bool { kind == .folder && !(collapsed ?? false) }
+
+    /// How far this folder's interior is scrolled (.zero when never nudged).
+    var scroll: CGSize { scrollOffset ?? .zero }
 
     /// True when this box is anchored: it can't be dragged and the push solver treats it as an
     /// immovable obstacle that siblings route around.
@@ -376,6 +383,12 @@ final class AppModel: ObservableObject {
     /// Input-only (not @Published — it never affects rendering).
     var scrollOverCard: Bool?
 
+    /// Routing lock for a scroll gesture that pans an OPEN folder's interior instead of the canvas
+    /// (decided once at the gesture's start, held for its duration — same reason as `scrollOverCard`).
+    /// A wrapped value distinguishes "decided: this folder" / "decided: no folder (pan canvas)" / nil.
+    /// Input-only (not @Published).
+    var scrollFolderTarget: UUID??
+
     // MARK: Live file-watching (the read side of the living canvas)
 
     /// Bumps whenever a watched file's content may have changed (our own write or an external edit in
@@ -640,6 +653,12 @@ final class AppModel: ObservableObject {
 
     func screenToWorld(_ p: CGPoint) -> CGPoint {
         CGPoint(x: (p.x - pan.width) / zoom, y: (p.y - pan.height) / zoom)
+    }
+
+    /// A world rect mapped into screen space (origin + size scaled by zoom, translated by pan).
+    func worldRectToScreen(_ r: CGRect) -> CGRect {
+        let origin = worldToScreen(r.origin)
+        return CGRect(x: origin.x, y: origin.y, width: r.width * zoom, height: r.height * zoom)
     }
 
     /// Convert a point in global (window) space to canvas-local screen space by removing the canvas
@@ -1283,11 +1302,52 @@ final class AppModel: ObservableObject {
         return board.nodes
             .compactMap { node -> (node: BoardNode, area: CGFloat)? in
                 guard !hidden.contains(node.id), include(node) else { return nil }
-                let frame = effectiveFrame(of: node)
-                guard frame.contains(point) else { return nil }
+                // Hit-test against the DRAWN rect (effectiveFrame shifted by any scrolled ancestors) and
+                // honor the clip: a child scrolled out of an open-folder ancestor's card window is hidden
+                // on screen, so it must not be hittable there either.
+                let frame = displayedFrame(of: node)
+                guard frame.contains(point), isVisibleThroughCards(node, at: point) else { return nil }
                 return (node, frame.width * frame.height)
             }
             .min { $0.area < $1.area }?.node
+    }
+
+    /// True when `point` (world) lies within every OPEN ancestor folder's DRAWN card-interior window —
+    /// i.e. the node isn't clipped away by a card it lives inside. Each ancestor's interior is shifted by
+    /// that ancestor's own `renderOffset` (a nested card is itself scrolled by its parents), matching the
+    /// render-side `.clipped()` exactly.
+    private func isVisibleThroughCards(_ node: BoardNode, at point: CGPoint) -> Bool {
+        var current = node
+        var depth = 0
+        var seen = Set<String>([node.relPath])
+        while let parent = parentFolder(of: current) {
+            guard depth < AppModel.maxFolderDepth, seen.insert(parent.relPath).inserted else { break }
+            if parent.isOpenFolder {
+                let shift = renderOffset(of: parent)
+                let window = cardInterior(of: parent).offsetBy(dx: shift.width, dy: shift.height)
+                if !window.contains(point) { return false }
+            }
+            current = parent
+            depth += 1
+        }
+        return true
+    }
+
+    /// The OPEN folder whose card interior a scroll over `point` should pan — the smallest (most specific)
+    /// open folder whose displayed interior window contains the point. nil → scroll pans the canvas. Used
+    /// by the input monitor to route two-finger scroll: over an open folder's interior, it scrolls that
+    /// folder's children; elsewhere it pans.
+    func scrollTargetFolder(at point: CGPoint) -> BoardNode? {
+        let hidden = hiddenNodeIds
+        return board.nodes
+            .filter { $0.isOpenFolder && !hidden.contains($0.id) }
+            .filter { folder in
+                let shift = renderOffset(of: folder)
+                let interior = cardInterior(of: folder).offsetBy(dx: shift.width, dy: shift.height)
+                return interior.contains(point) && isVisibleThroughCards(folder, at: point)
+            }
+            .min { let a = effectiveFrame(of: $0), b = effectiveFrame(of: $1)
+                   return a.width * a.height < b.width * b.height }
     }
 
     /// Folder under `point` that box `id` could legally re-file into: the smallest folder
@@ -1663,6 +1723,104 @@ final class AppModel: ObservableObject {
         let wf = worldFrame(of: node)
         let width = min(wf.width, AppModel.collapsedFolderWidth)
         return CGRect(x: wf.minX, y: wf.minY, width: width, height: AppModel.folderHeaderHeight)
+    }
+
+    // MARK: Folder-as-card scroll viewport (Folder-Canvas Phase 2 · PR-2)
+    //
+    // An OPEN folder is a fixed-size card that *clips* its children to its bounds. When the card is
+    // smaller than its content, two-finger scrolling over the interior pans the children inside the
+    // card. Scroll is a transient view nudge (like canvas pan) — it shifts where children RENDER, never
+    // their stored layout — so it lives outside `effectiveFrame`'s un-scrolled world coordinates.
+
+    /// The world rect a folder's children occupy — the content the card scrolls over. Reuses the
+    /// retired auto-grow union (PR-1's `legacyAutoGrownFrame`, the open content footprint) so the card
+    /// and its scroll clamp agree on "everything inside".
+    func contentExtent(of folder: BoardNode) -> CGRect {
+        legacyAutoGrownFrame(of: folder, asOpenCard: true)
+    }
+
+    /// How far a node is shifted when drawn, because one or more OPEN ancestor folders are scrolled:
+    /// the sum of every open ancestor's `scrollOffset` up the chain. A collapsed ancestor contributes
+    /// nothing (its children are hidden anyway). A child of a scrolled folder rides this offset.
+    func renderOffset(of node: BoardNode) -> CGSize {
+        var offset = CGSize.zero
+        var current = node
+        var depth = 0
+        var seen = Set<String>([node.relPath])
+        while let parent = parentFolder(of: current) {
+            guard depth < AppModel.maxFolderDepth, seen.insert(parent.relPath).inserted else { break }
+            if parent.isOpenFolder { offset.width += parent.scroll.width; offset.height += parent.scroll.height }
+            current = parent
+            depth += 1
+        }
+        return offset
+    }
+
+    /// A node's displayed (drawn) world frame: its `effectiveFrame` shifted by `renderOffset`. Render
+    /// and hit-test BOTH route through this, so a scrolled child is hit where it's drawn. (Layout reads
+    /// — push, marquee, bounds — keep using the un-scrolled `effectiveFrame`.)
+    func displayedFrame(of node: BoardNode) -> CGRect {
+        effectiveFrame(of: node).offsetBy(dx: renderOffset(of: node).width, dy: renderOffset(of: node).height)
+    }
+
+    /// The scrollable interior of an OPEN folder's card in world space: its frame minus the header strip
+    /// (the header + border don't scroll — only the interior children do, and the card clips to here).
+    func cardInterior(of folder: BoardNode) -> CGRect {
+        let frame = effectiveFrame(of: folder)
+        let header = AppModel.folderHeaderHeight
+        return CGRect(x: frame.minX, y: frame.minY + header, width: frame.width, height: max(0, frame.height - header))
+    }
+
+    /// The DRAWN-world rect a node is clipped to: the intersection of every OPEN ancestor folder's
+    /// drawn card interior (each shifted by its own `renderOffset`). nil when the node has no open-folder
+    /// ancestor (a root box is never clipped). The render side masks each child to this window so content
+    /// overflowing a shrunk folder card is hidden until scrolled into view.
+    func clipWindow(of node: BoardNode) -> CGRect? {
+        var window: CGRect?
+        var current = node
+        var depth = 0
+        var seen = Set<String>([node.relPath])
+        while let parent = parentFolder(of: current) {
+            guard depth < AppModel.maxFolderDepth, seen.insert(parent.relPath).inserted else { break }
+            if parent.isOpenFolder {
+                let shift = renderOffset(of: parent)
+                let interior = cardInterior(of: parent).offsetBy(dx: shift.width, dy: shift.height)
+                window = window?.intersection(interior) ?? interior
+            }
+            current = parent
+            depth += 1
+        }
+        return window
+    }
+
+    /// Nudge an open folder's interior by `delta`, clamped so it can never scroll past its content. On
+    /// each axis the offset stays within `[min(0, interior − content) … 0]`: 0 when the content already
+    /// fits (nothing to reveal), else just enough negative shift to bring the far edge into view. A
+    /// transient view nudge — NOT undoable (don't route through `transaction`); just set + `save()` so it
+    /// persists like a pan.
+    func scrolledFolder(_ id: UUID, by delta: CGSize) {
+        guard let index = board.nodes.firstIndex(where: { $0.id == id }),
+              board.nodes[index].isOpenFolder else { return }
+        let interior = cardInterior(of: board.nodes[index]).size
+        let content = contentExtent(of: board.nodes[index]).size
+        let current = board.nodes[index].scroll
+        let clamped = AppModel.clampScroll(CGSize(width: current.width + delta.width,
+                                                  height: current.height + delta.height),
+                                           interior: interior, content: content)
+        board.nodes[index].scrollOffset = (clamped == .zero) ? nil : clamped
+        save()
+    }
+
+    /// Clamp a folder's interior scroll offset to its content. Pure (no model state) so the headless
+    /// `Tests/FolderScrollClampTests.swift` can port exactly this math. Per axis: an axis whose content
+    /// fits the interior (`content <= interior`) pins at 0; otherwise the offset is bounded to
+    /// `[interior − content … 0]` (0 == top/left edge, `interior − content` == bottom/right edge flush).
+    static func clampScroll(_ offset: CGSize, interior: CGSize, content: CGSize) -> CGSize {
+        func axis(_ value: CGFloat, _ visible: CGFloat, _ extent: CGFloat) -> CGFloat {
+            extent <= visible ? 0 : min(0, max(visible - extent, value))
+        }
+        return CGSize(width: axis(offset.width, interior.width, content.width),
+                      height: axis(offset.height, interior.height, content.height))
     }
 
     /// Boxes hidden from render / hit-test / marquee because an ancestor folder is collapsed. They
