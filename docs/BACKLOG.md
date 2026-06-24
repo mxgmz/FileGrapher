@@ -55,10 +55,16 @@ folder-organization + smart expansion. Phasing is risk-ordered:
       so nothing jumps; collapsed folders seed their open footprint not the header (fixed in review). Resize
       clamp removed (cards resize freely). `Tests/FolderCardSeedTests`; verified LOSSLESS on the real 222-node
       board (0 leaves moved; collapsed chips move ≤118px).
-    - 🔄 **PR-2 — clip + scroll within the card** (Canvas viewport: clip children to the card, per-folder
-      `scrollOffset`, two-finger scroll pans interior, hit-test stays aligned). User opts a folder into
-      compact-card mode by resizing it down.
-    - ⬜ **PR-3+** — compact default card size / scrollbar affordance / polish.
+    - ✅ **PR-2 / #15 (S29) — clip + scroll viewport.** An open folder clips its children to its card and
+      two-finger scroll over the interior pans them. Single drawn-rect source `displayedFrame =
+      effectiveFrame + renderOffset` feeds BOTH render and hit-test (alignment by construction); clip via a
+      `CardClip` mask to the intersection of open-ancestor card windows; `scrollOffset` (transient, clamped,
+      saved) + gesture-locked scroll routing. `Tests/FolderScrollClampTests` 8/8; full suite 7/7; build clean.
+      **Visually verified by Max** (clip, scroll, routing, hit-test-after-scroll all good). User opts a folder
+      into compact mode by resizing it down. *Deferred (agent-flagged): connector edges aren't clipped to the
+      card; Quick Look peek anchors to the un-scrolled child position.*
+    - ⬜ **PR-3+** — compact default card size (folders start small, scroll-to-see-more) / scrollbar affordance
+      / edge-clipping + peek-offset polish.
 - ⬜ **Phase 3 — Smart expansion**. Per-folder view memory; title→preview→full spectrum; learned pre-expand.
 
 ---

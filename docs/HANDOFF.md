@@ -5,25 +5,51 @@ open questions. At a session's start, read the top entry to pick up where we lef
 
 ---
 
-## ▶ NEXT SESSION — START HERE · S29 — **Phase 2 lean slice (bound auto-grow) done. Next: full folder-as-card, or Phase 3.**
+## ▶ NEXT SESSION — START HERE · S30 — **Full folder-as-card SHIPPED (clip + scroll viewport). Next: card polish or Phase 3.**
 
-S28 shipped the **lean Phase 2 slice — "bound auto-grow"** (PR #13, merged): Max chose the smallest step before
-full folder-as-card. A folder still fits its near children, but `AppModel.autoGrowChildren` excludes a far-flung
-**outlier** (>6000px from the sibling median) so one scattered box can't balloon the folder — it renders loose.
-`effectiveFrame` + `contentsBounds` use it; the threshold was **tuned on the real recordentaln8n board** (excludes
-only ~2% — the genuine far-flung outliers — leaving every legit cluster/tall-stack intact). **main @ `8d00823`
-(+ this doc commit), build clean, all 5 headless suites pass** (`Tests/AutoGrowBoundTests` added). Live-verified:
-a folder with a 7000px outlier stays compact; real board opens healthy.
+S29 built **full folder-as-card** via a serial sub-agent PR chain (Max as orchestrator/reviewer): folders are now
+**bounded scroll-viewport cards** — retired auto-grow, and a folder clips its children to its card with two-finger
+scroll panning the interior. **Design LOCKED: scroll-within-card** (NOT zoom-to-enter). **main @ `b270fc5`, build
+clean, all 7 headless suites pass.**
+
+**What shipped (S29):**
+- **PR #14 — retire auto-grow + seed card size.** `effectiveFrame(open folder)` = its stored card (no child
+  union); a one-time `v2→v3` `seedFolderCardsIfNeeded` froze each folder's **open** footprint as its card
+  (re-relativizing children → nothing jumps; collapsed folders seed their open footprint, fixed in review).
+  Resize clamp removed (cards resize freely). Verified LOSSLESS on the real 222-node board.
+- **PR #15 — clip + scroll viewport.** Single drawn-rect source `displayedFrame = effectiveFrame + renderOffset`
+  feeds BOTH render and hit-test (alignment by construction); `CardClip` mask to the open-ancestor card window;
+  `BoardNode.scrollOffset` (transient, clamped, saved) + gesture-locked two-finger-scroll routing. **Visually
+  verified by Max** (clip / scroll / routing / hit-test-after-scroll all good).
+- board.json is now **version 3**. New tests: `FolderCardSeedTests`, `FolderScrollClampTests`.
+
+> 🔑 **Mental model now:** an open folder is a fixed-size card; it does NOT auto-grow. Children clip to the card;
+> overflow is reached by two-finger scrolling the interior. A folder becomes a compact card when you **resize it
+> down** (cards resize freely). `displayedFrame` = where a box is DRAWN (effectiveFrame + scroll); use it for
+> render/hit-test, `effectiveFrame` for layout (push/marquee/bounds).
 
 **▶ NEXT BUILD options:**
-- **Full folder-as-card** (the rest of `SPEC-folder-canvas.md` §6 step 3): retire auto-grow entirely; a folder
-  becomes a bounded **card / viewport** that **clips + scrolls** its own canvas; chip→card→**entered** by zoom.
-  This is the big behavior-changing one — Max deferred it this session in favor of the lean bound. Needs the
-  transition (seed each folder's card size from its current auto-grown size so nothing jumps) + a scrollable
-  clipped interior, and (the biggest piece) zoom-to-enter a sub-canvas.
-- **Phase 3 — smart expansion**: per-folder view memory (expanded set + pan/zoom on the folder), title→preview→full
-  spectrum, learned pre-expand from open-counts.
-- **Cartographer altitude-awareness**: `canvas_arrange` within a folder's own canvas (now natural post-Phase-1).
+- **Card polish (the obvious next)**: folders default to a **compact card size** (so they start small,
+  scroll-to-see-more) instead of seeded full-footprint; a **scrollbar/overflow affordance**; clip **connector
+  edges** to the card border; fix **Quick Look peek** anchoring to a scrolled child. *(agent-flagged deferrals.)*
+- **Phase 3 — smart expansion**: per-folder view memory (expanded set + pan/zoom on the folder),
+  title→preview→full spectrum, learned pre-expand from open-counts.
+- **Cartographer altitude-awareness**: `canvas_arrange` within a folder's own canvas (natural post-Phase-1).
+
+> ⚠️ **Screenshot gotcha hit this session:** the app opens on Max's **secondary display**, which powered OFF
+> mid-session → `screencapture -l<id>` returns all-black (NOT a lock — `lockcheck` said unlocked; `caffeinate -u`
+> + AppleScript window-move + relaunch all failed to relocate it). Max eyeballed PR-15 himself. If you need a
+> screenshot and get black on a `y<0` window, the display is asleep/off — ask Max or wait.
+
+---
+
+## S29 — **Full folder-as-card: clip + scroll viewport (PRs #14, #15, merged)** — *(see START-HERE above)*
+
+Built as a serial sub-agent PR chain (folder-as-card is one coupled feature on `effectiveFrame` + the render path,
+so NOT parallelizable — sequenced PRs, each reviewed/verified/merged before the next forks). Review caught a real
+bug in PR #14 (collapsed folders seeded to their 220×40 header instead of their open footprint — found on the real
+board, not the unit test → bounced to the agent → fixed). PR #15's visual verification was Max's (the canvas
+viewport isn't headless-testable, and my screenshots were blocked by an off display).
 
 ---
 
