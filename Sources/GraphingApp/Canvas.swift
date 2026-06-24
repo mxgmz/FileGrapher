@@ -1052,6 +1052,7 @@ struct NodeView: View {
     private var content: some View {
         if node.isExpanded { expandedCard }   // note card, or a folder's folder-note card
         else if node.kind == .folder { folderBox }
+        else if node.isPreviewing { previewBox }   // title + first lines, the middle display level
         else { noteBox }
     }
 
@@ -1256,6 +1257,50 @@ struct NodeView: View {
             RoundedRectangle(cornerRadius: GappStyle.cornerRadius * scale)
                 .stroke(noteBorderColor, lineWidth: boxBorderWidth * scale)
         )
+    }
+
+    /// The preview level: title + the first few lines of the note's content, read-only and clipped to
+    /// the box. A glance between bare title and the full editable card — content loads lazily (same
+    /// `fileText` the card uses) and re-reads on disk changes.
+    private var previewBox: some View {
+        VStack(alignment: .leading, spacing: 5 * scale) {
+            HStack(spacing: 6 * scale) {
+                Image(systemName: noteIconName)
+                    .foregroundStyle(hasCustomColor ? node.accent : Color.secondary)
+                    .font(.system(size: 12 * scale * node.sizeScale))
+                title.font(.system(size: 13 * node.fontScaleValue * scale * node.sizeScale, weight: .semibold))
+            }
+            Text(previewLines.isEmpty ? "Empty note" : previewLines)
+                .font(.system(size: 11 * scale))
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.leading)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        }
+        .padding(10 * scale)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .background(
+            RoundedRectangle(cornerRadius: GappStyle.cornerRadius * scale)
+                .fill(Color(nsColor: .controlBackgroundColor))
+                .shadow(color: .black.opacity(GappStyle.shadowOpacity), radius: boxShadowRadius * scale, y: GappStyle.shadowOffsetY * scale)
+        )
+        .clipShape(RoundedRectangle(cornerRadius: GappStyle.cornerRadius * scale))
+        .overlay(
+            RoundedRectangle(cornerRadius: GappStyle.cornerRadius * scale)
+                .stroke(noteBorderColor, lineWidth: boxBorderWidth * scale)
+        )
+        .onAppear { cardText = model.fileText(node.id) }
+        .onChange(of: model.diskRevision) { _, _ in cardText = model.fileText(node.id) }
+        .onChange(of: model.viewedCommit) { _, _ in cardText = model.fileText(node.id) }
+    }
+
+    /// First few non-empty lines of the note's content, for the preview level. Raw text (markdown shows
+    /// as written) — a glance, not a render; the box clips the overflow.
+    private var previewLines: String {
+        cardText.split(separator: "\n", omittingEmptySubsequences: false)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+            .prefix(6)
+            .joined(separator: "\n")
     }
 
     private var noteBorderColor: Color {
@@ -1466,6 +1511,9 @@ struct NodeView: View {
     private var menu: some View {
         Button("Rename") { model.editingId = node.id; model.selection = [node.id] }
         if node.kind == .note {
+            Button(node.isPreviewing ? "Hide Preview" : "Show Preview") {
+                withAnimation(gappSpring) { model.togglePreview(node.id) }
+            }
             Button(node.isExpanded ? "Collapse Card" : "Expand Card") {
                 withAnimation(gappSpring) { model.toggleExpand(node.id) }
             }

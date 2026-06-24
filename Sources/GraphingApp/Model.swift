@@ -106,9 +106,14 @@ struct BoardNode: Identifiable, Codable, Equatable {
     var fileId: UInt64?          // disk inode — lets syncFromDisk follow a box to a file's new path
     var pinned: Bool?            // anchored: can't be dragged, and collision push never moves it; nil/false == free
     var scrollOffset: CGSize?    // open folder: how far its interior is scrolled (nil == .zero), a transient view nudge
+    var preview: Bool?           // note showing its first lines inline (the middle display level); nil/false == title-only
 
     /// True when this box is showing content inline as a card (notes, and folders via their folder-note).
     var isExpanded: Bool { expanded ?? false }
+
+    /// True when this note shows a few lines of its content inline — the middle of the title → preview →
+    /// full spectrum (Folder-Canvas Phase 3). Mutually exclusive with `isExpanded`.
+    var isPreviewing: Bool { kind == .note && !(expanded ?? false) && (preview ?? false) }
 
     /// True when this folder is collapsed (children hidden, frame shrunk to its header).
     var isCollapsedFolder: Bool { kind == .folder && (collapsed ?? false) }
@@ -461,6 +466,10 @@ final class AppModel: ObservableObject {
 
     /// Default size a note grows to when expanded into an in-place content card.
     static let expandedSize = CGSize(width: 360, height: 320)
+
+    /// Size a note grows to at the *preview* level — big enough for the title + a few lines of content,
+    /// well short of a full card. The middle rung of the display spectrum (Folder-Canvas Phase 3).
+    static let previewSize = CGSize(width: 220, height: 150)
 
     // MARK: Coordinate transforms
 
@@ -2473,6 +2482,7 @@ final class AppModel: ObservableObject {
         transaction {
             board.nodes[idx].expanded = on
             if on {
+                board.nodes[idx].preview = nil   // full and preview are exclusive rungs of the spectrum
                 // Open at the remembered card size (or the default), never below the current frame.
                 let card = board.nodes[idx].cardSize ?? AppModel.expandedSize
                 board.nodes[idx].width = max(board.nodes[idx].width, card.width)
@@ -2492,6 +2502,36 @@ final class AppModel: ObservableObject {
     func toggleExpand(_ id: UUID) {
         guard let n = node(id) else { return }
         setExpanded(id, !(n.expanded ?? false))
+    }
+
+    /// Show or hide a note's inline preview (the middle of the title → preview → full spectrum,
+    /// Folder-Canvas Phase 3). Preview and the full card are exclusive: turning preview on drops the
+    /// card; turning it off returns to title-only. Sized to `previewSize` (grown, never shrinking a box
+    /// the user already enlarged); a bigger preview can overlap neighbors, so it rides the push solver.
+    /// Notes only — a folder's "content" is its folder-note, reached through expand. Undoable.
+    func setPreview(_ id: UUID, _ on: Bool) {
+        guard let idx = board.nodes.firstIndex(where: { $0.id == id }), board.nodes[idx].kind == .note else { return }
+        guard (board.nodes[idx].preview ?? false) != on else { return }
+        transaction {
+            board.nodes[idx].preview = on ? true : nil
+            if on {
+                let wasFull = board.nodes[idx].expanded ?? false
+                board.nodes[idx].expanded = nil
+                let target = AppModel.previewSize
+                // Coming down from a full card, snap to the preview size; coming up from title, grow to it
+                // but respect a box the user had already made larger.
+                board.nodes[idx].width = wasFull ? target.width : max(board.nodes[idx].width, target.width)
+                board.nodes[idx].height = wasFull ? target.height : max(board.nodes[idx].height, target.height)
+                resolveOverlaps(movedId: id)
+            } else {
+                board.nodes[idx].width = gappDefaultNoteSize.width
+                board.nodes[idx].height = gappDefaultNoteSize.height
+            }
+        }
+    }
+    func togglePreview(_ id: UUID) {
+        guard let n = node(id) else { return }
+        setPreview(id, !(n.preview ?? false))
     }
 
     /// A folder's folder-note path (Obsidian convention: `<FolderName>.md` inside the folder). The
