@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import UniformTypeIdentifiers
 
 let gappSpring = Animation.spring(response: 0.30, dampingFraction: 0.78)
 
@@ -30,6 +31,7 @@ struct CanvasView: View {
     @State private var marqueeStart: CGPoint?
     @State private var marqueeCurrent: CGPoint?
     @State private var marqueeBase: Set<UUID> = []   // selection to add to (Shift-drag)
+    @State private var finderDropTargeted = false    // a Finder drag is hovering the canvas
     // input monitor (scroll / pinch / delete key)
     @State private var monitor: Any?
 
@@ -98,6 +100,8 @@ struct CanvasView: View {
     private var background: some View {
         Rectangle()
             .fill(Color(nsColor: .textBackgroundColor))
+            // Faint accent wash while a Finder drag hovers, so the canvas reads as a drop target.
+            .overlay(finderDropTargeted ? Color.accentColor.opacity(0.06) : Color.clear)
             .contentShape(Rectangle())
             .gesture(marqueeGesture)
             .gesture(
@@ -113,7 +117,34 @@ struct CanvasView: View {
                         }
                     )
             )
+            .onDrop(of: [.fileURL], isTargeted: $finderDropTargeted) { providers, location in
+                importFromFinder(providers, at: location)
+            }
             .contextMenu { backgroundMenu }
+    }
+
+    /// Resolve dropped `NSItemProvider`s to file URLs, then hand them to the model to copy into the vault
+    /// and box at the drop point. `location` is in the background's local (canvas screen) space, so
+    /// `screenToWorld` maps it straight to the world drop point. Providers load asynchronously, so collect
+    /// them and dispatch the import once all have resolved (back on the main actor). Returns true to accept.
+    private func importFromFinder(_ providers: [NSItemProvider], at location: CGPoint) -> Bool {
+        let world = model.screenToWorld(location)
+        let parent = model.folderNode(containing: world)?.id
+        let group = DispatchGroup()
+        var urls: [URL] = []
+        let lock = NSLock()
+        for provider in providers {
+            group.enter()
+            _ = provider.loadObject(ofClass: URL.self) { url, _ in
+                if let url { lock.lock(); urls.append(url); lock.unlock() }
+                group.leave()
+            }
+        }
+        group.notify(queue: .main) {
+            guard !urls.isEmpty else { return }
+            withAnimation(gappSpring) { model.importFiles(urls, atWorld: world, into: parent) }
+        }
+        return true
     }
 
     /// Right-click on empty canvas: create / paste / select-all. (Box and connector menus live on

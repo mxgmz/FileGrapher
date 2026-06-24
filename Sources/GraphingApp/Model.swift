@@ -350,6 +350,7 @@ final class AppModel: ObservableObject {
     var canPaste: Bool { !clipboard.isEmpty }
 
     @Published var peekId: UUID?     // box whose file content is open in the peek popover (nil == none)
+    @Published var quickOpenVisible = false   // the ⌘P fuzzy-jump palette is showing (see QuickOpen.swift)
 
     /// Forced UI appearance. Light when true, dark when false. Persisted; seeded from the
     /// system appearance on first launch so the toggle starts where the user already is.
@@ -1957,8 +1958,9 @@ final class AppModel: ObservableObject {
     }
 
     /// Run a mutating action as a single undoable transaction (nestable).
-    /// Module-internal (not `private`) so same-module cartographer extensions (MCPServer.swift) can bundle
-    /// their mutations into one ⌘Z step — the same guarantee every UI mutation already gets.
+    /// Module-internal (not `private`) so same-module extensions — `FinderImport` (drag-in) and the
+    /// cartographer laws in `MCPServer.swift` — can bundle their board + disk mutations into one ⌘Z step
+    /// using the same engine every UI mutation already gets.
     func transaction(_ body: () -> Void) {
         if txnDepth == 0 { txnBefore = board; txnFileUndo = []; txnFileRedo = [] }
         txnDepth += 1
@@ -2049,6 +2051,22 @@ final class AppModel: ObservableObject {
         rawCopy(from, to)
         txnFileRedo.append { self.rawCopy(from, to) }
         txnFileUndo.append { _ = self.rawTrash(to) }
+    }
+
+    /// Copy a file/folder from OUTSIDE the vault (a Finder drag-in) to vault-relative `to`, recursively,
+    /// and register the inverse (trash the copy on undo). Like `tCopy`, but the source is an absolute URL
+    /// rather than an in-vault path. Internal so the `FinderImport` sibling-file extension can reuse it.
+    /// Must run inside a `transaction`.
+    func tImport(from externalSource: URL, to rel: String) {
+        guard let vault else { return }
+        markSelfWrite(rel)
+        let parent = (rel as NSString).deletingLastPathComponent
+        if !parent.isEmpty {
+            try? FileManager.default.createDirectory(at: vault.url(parent), withIntermediateDirectories: true)
+        }
+        try? FileManager.default.copyItem(at: externalSource, to: vault.url(rel))
+        txnFileRedo.append { try? FileManager.default.copyItem(at: externalSource, to: vault.url(rel)) }
+        txnFileUndo.append { _ = self.rawTrash(rel) }
     }
     private func tTrash(_ rel: String) {
         var url = rawTrash(rel)
