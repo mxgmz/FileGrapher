@@ -47,8 +47,18 @@ folder-organization + smart expansion. Phasing is risk-ordered:
     folder (it renders loose). `effectiveFrame` + `contentsBounds` use it. Cluster-relative (tall legit stacks
     kept). Threshold tuned on the real board (~2% excluded). **Tests/AutoGrowBoundTests**; live + real-board
     verified.
-  - ⬜ **Full folder-as-card** (deferred): retire auto-grow entirely; folder = bounded card/viewport that
-    clips + scrolls its own canvas; chip→card→**entered** by zoom.
+  - 🔄 **Full folder-as-card** (building, S29, sub-agent PR chain). **Access model LOCKED: scroll-within-card**
+    (a folder card is a fixed window; two-finger scroll pans its interior — NOT zoom-to-enter).
+    - ✅ **PR-1 / #14 (S29) — retire auto-grow + seed card size.** `effectiveFrame(open folder)` = its stored
+      card (no child union); `legacyAutoGrownFrame` keeps the old union for the seed; one-time `v2→v3`
+      `seedFolderCardsIfNeeded` freezes each folder's **open** footprint as its card (re-relativizing children),
+      so nothing jumps; collapsed folders seed their open footprint not the header (fixed in review). Resize
+      clamp removed (cards resize freely). `Tests/FolderCardSeedTests`; verified LOSSLESS on the real 222-node
+      board (0 leaves moved; collapsed chips move ≤118px).
+    - 🔄 **PR-2 — clip + scroll within the card** (Canvas viewport: clip children to the card, per-folder
+      `scrollOffset`, two-finger scroll pans interior, hit-test stays aligned). User opts a folder into
+      compact-card mode by resizing it down.
+    - ⬜ **PR-3+** — compact default card size / scrollbar affordance / polish.
 - ⬜ **Phase 3 — Smart expansion**. Per-folder view memory; title→preview→full spectrum; learned pre-expand.
 
 ---
