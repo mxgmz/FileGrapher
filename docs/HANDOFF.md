@@ -5,7 +5,29 @@ open questions. At a session's start, read the top entry to pick up where we lef
 
 ---
 
-## ▶ NEXT SESSION — START HERE · S30 — **Full folder-as-card SHIPPED (clip + scroll viewport). Next: card polish or Phase 3.**
+## ▶ NEXT SESSION — START HERE · S30 — **3 parallel-agent lanes SHIPPED (Quick-open ⌘P · Finder drag-in · Cartographer gravity). Next: card polish (serial).**
+
+S30 ran the documented multi-agent flow: Max picks the batch → I write conflict-domain lane briefs → 3 background worktree agents each author ONE PR → I review + verify + merge serially. **main @ `988c317`, build clean, all 10 headless suites pass.** The partition trick that let 3 agents touch the same hot files safely: each lane put its new `AppModel` logic in its **own file** as an `extension AppModel` (same module), so `Model.swift` core was barely touched.
+
+**What shipped (S30):**
+- **PR #16 — Quick-open palette (⌘P) [Lane A].** New `QuickOpen.swift` (overlay + `extension AppModel` matcher) + 1 `@Published` + 1 App.swift command. Fuzzy substring search over all nodes (prefix ranks first), ↑/↓/Enter/Esc, reuses the existing `center(on:)` to pan-to + select. `Tests/QuickOpenSearchTests`.
+- **PR #17 — Drag-in from Finder [Lane B].** Drop `.md`/`.csv`/code files or a folder onto the canvas → copied into the vault (collision-safe `uniqueRel`) + boxed at the drop point, ONE `transaction` so a single ⌘Z reverses box+file. Canvas-background `.onDrop` + new `FinderImport.swift` (`importFiles` reuses the `relativeCenter` chokepoint) + new `tImport` (external-URL undoable copy). `Tests/FinderImportTests`.
+- **PR #18 — Cartographer gravity + minimal-motion [Lane C].** Gravity (VISION §4): a note's *first* link pulls it beside its kin (`placeNearKin` via `nearestFreeCenter`). Minimal-motion: `canvas_arrange` skips spokes already within `arrangeSettleRadius` (24pt) of their slot (re-run on a tidy hub = no-op), nearest-slot pairing. All in `MCPServer.swift` (`extension AppModel`). `Tests/CartographerGravityTests`.
+- **One shared edit:** `transaction(_:)` widened `private`→`internal` (both B & C needed it for their sibling-file extensions). The only merge conflict — trivial, resolved into one combined comment at C's merge.
+
+> ⚠️ **OWE MAX A VISUAL PASS** (batched per the review workflow — headless + build verified, UI not eyeballed):
+> - **A:** ⌘P opens the palette; typing filters + ranks; Enter pans-to + selects; Esc / scrim-click closes.
+> - **B:** drop a `.md` on empty canvas → file appears in the vault + box at the drop point; drop onto a folder → filed inside; drop a folder → boxed with children; **one ⌘Z reverses box + file**.
+> - **C:** (needs the live MCP server) create + link a note → it lands beside its kin; re-`canvas_arrange` a tidy hub → nothing twitches.
+
+**▶ NEXT BUILD options:**
+- **Card polish (the held-back serial thread):** folders default to a **compact card size** (start small, scroll-to-see-more) instead of seeded full-footprint; a **scrollbar/overflow affordance**; clip **connector edges** to the card border; fix **Quick Look peek** anchoring to a scrolled child. On the `effectiveFrame`/render hot path → run as ONE serial lane (not parallel).
+- **Phase 3 — smart expansion** (per-folder view memory, title→preview→full spectrum, learned pre-expand).
+- **More parallel quick-wins** (next batch): collapsed-folder header truncation fix · arrow-key nudge · remember-viewport-per-vault · Open-in-Obsidian deep link.
+
+---
+
+## S29 (recap) — **Full folder-as-card SHIPPED (clip + scroll viewport). Next: card polish or Phase 3.**
 
 S29 built **full folder-as-card** via a serial sub-agent PR chain (Max as orchestrator/reviewer): folders are now
 **bounded scroll-viewport cards** — retired auto-grow, and a folder clips its children to its card with two-finger
