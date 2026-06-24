@@ -350,6 +350,7 @@ final class AppModel: ObservableObject {
     var canPaste: Bool { !clipboard.isEmpty }
 
     @Published var peekId: UUID?     // box whose file content is open in the peek popover (nil == none)
+    @Published var quickOpenVisible = false   // the ⌘P fuzzy-jump palette is showing (see QuickOpen.swift)
 
     /// Forced UI appearance. Light when true, dark when false. Persisted; seeded from the
     /// system appearance on first launch so the toggle starts where the user already is.

@@ -42,6 +42,8 @@ struct GraphingAppApp: App {
                     .keyboardShortcut("z", modifiers: [.command, .shift])
             }
             CommandGroup(after: .sidebar) {
+                Button("Quick Open…") { model.quickOpenVisible.toggle() }
+                    .keyboardShortcut("p", modifiers: .command)
                 // ⌘= shares a key with ⌘+ (+ is shift-=), so binding "=" makes ⌘+ work without Shift.
                 Button("Zoom In") { model.zoomIn() }
                     .keyboardShortcut("=", modifiers: .command)
@@ -165,6 +167,9 @@ struct MainView: View {
                 CanvasView()
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
+        }
+        .overlay {
+            if model.quickOpenVisible { QuickOpenView() }
         }
     }
 }
