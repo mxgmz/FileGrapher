@@ -1380,6 +1380,24 @@ final class AppModel: ObservableObject {
         board.nodes.filter { $0.parentRel == relPath }
     }
 
+    /// A child farther than this from its siblings' cluster (their median) is a far-flung outlier and is
+    /// EXCLUDED from its folder's auto-grow — so one scattered box can't balloon the folder; it just renders
+    /// loose, outside the frame. Tuned (on the real recordentaln8n board) to catch only genuine outliers
+    /// (~2% of boxes): many children legitimately stacked tall are NOT outliers, since each sits near its
+    /// neighbors. (Folder-Canvas Phase 2 — "bound auto-grow", the minimal step before folder-as-card.)
+    static let autoGrowOutlierRadius: CGFloat = 6000
+
+    /// Direct children that count toward a folder's auto-grown frame: all of them, minus far-flung outliers.
+    /// Falls back to all children if the filter would leave none (degenerate: every child its own outlier).
+    /// ponytail: medians per call (effectiveFrame is hot); fine at this scale — memoize if a huge vault bites.
+    private func autoGrowChildren(of node: BoardNode) -> [BoardNode] {
+        let children = directChildren(of: node.relPath)
+        guard children.count > 1 else { return children }
+        let mx = median(children.map { $0.center.x }), my = median(children.map { $0.center.y })
+        let near = children.filter { hypot($0.center.x - mx, $0.center.y - my) <= AppModel.autoGrowOutlierRadius }
+        return near.isEmpty ? children : near
+    }
+
     // MARK: World coordinates (relative storage → absolute derivation — SPEC-folder-canvas.md §0–2)
     //
     // A node's stored `x,y` is its center *relative to its parent folder's center* (root nodes: relative
@@ -1544,7 +1562,7 @@ final class AppModel: ObservableObject {
             return worldFrame(of: node)
         }
         var frame = worldFrame(of: node)
-        let children = directChildren(of: node.relPath)
+        let children = autoGrowChildren(of: node)   // exclude far-flung outliers so one box can't balloon the folder
         if !children.isEmpty {
             var bounds = effectiveFrame(of: children[0], visited: &visited, depth: depth + 1)
             for child in children.dropFirst() {
@@ -1564,7 +1582,7 @@ final class AppModel: ObservableObject {
     /// bounds + padding + header), or nil when empty. Same region `effectiveFrame` auto-grows into;
     /// the resize clamp uses it so a folder can't be drawn smaller than what it holds.
     func contentsBounds(of node: BoardNode) -> CGRect? {
-        let children = directChildren(of: node.relPath)
+        let children = autoGrowChildren(of: node)   // a far outlier shouldn't block resizing the folder smaller
         guard let first = children.first else { return nil }
         var bounds = effectiveFrame(of: first)
         for child in children.dropFirst() { bounds = bounds.union(effectiveFrame(of: child)) }
