@@ -2617,6 +2617,19 @@ final class AppModel: ObservableObject {
         transaction { board.nodes[idx].width = w; board.nodes[idx].height = h }
     }
 
+    /// Shrink an open folder's card to the compact default (the size a NEW folder opens at), so a
+    /// folder whose card was seeded to its full open footprint becomes a small scroll viewport in one
+    /// click. Children don't move (their world coords are unchanged) — the card just shrinks around them
+    /// and the overflow becomes scrollable; scroll resets to the top.
+    func compactCard(_ id: UUID) {
+        guard let node = node(id), node.kind == .folder, node.isOpenFolder else { return }
+        setSize(id, AppModel.folderSize)   // undoable
+        if let idx = board.nodes.firstIndex(where: { $0.id == id }) {
+            board.nodes[idx].scrollOffset = nil   // back to the top, like resetting a pan (transient)
+            save()
+        }
+    }
+
     /// Pin or unpin one or more boxes. A pinned box can't be dragged and the push solver never moves
     /// it (it's an obstacle others route around). Undoable. `pinned` is stored as nil when false so old
     /// board.json round-trips byte-compatibly.

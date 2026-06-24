@@ -424,6 +424,18 @@ struct CanvasView: View {
         return (p1, c1, c2, p2)
     }
 
+    /// Screen-space clip window for a connector whose endpoints both sit inside the SAME open-folder
+    /// card, so an intra-card edge is masked to the card exactly like its boxes are (no line spilling
+    /// past the card border when the interior is scrolled). nil when either endpoint is outside any card
+    /// — a root edge, or one crossing the card boundary, stays unclipped (its line legitimately leaves
+    /// the card). ponytail: only intra-card edges clip; cross-boundary clipping is deferred.
+    private func edgeClipScreen(from: UUID, to: UUID) -> CGRect? {
+        guard let a = model.node(from), let b = model.node(to),
+              let wa = model.clipWindow(of: a), let wb = model.clipWindow(of: b) else { return nil }
+        let inter = wa.intersection(wb)
+        return inter.isNull ? nil : model.worldRectToScreen(inter)
+    }
+
     /// One hit-testable, selectable view per connector (taps select, right-click restyles/deletes).
     private var interactiveEdges: some View {
         let hidden = model.hiddenNodeIds
@@ -433,6 +445,7 @@ struct CanvasView: View {
                     EdgeLine(edge: edge, p1: g.0, c1: g.1, c2: g.2, p2: g.3,
                              selected: model.selectedEdge == edge.id,
                              absentInHistory: model.isEdgeAbsentInHistory(edge.id))
+                        .modifier(CardClip(window: edgeClipScreen(from: edge.from, to: edge.to)))
                 }
             }
         }
@@ -447,6 +460,7 @@ struct CanvasView: View {
             ForEach(model.promotedEdges) { promoted in
                 if let g = edgeGeometry(BoardEdge(from: promoted.from, to: promoted.to)) {
                     PromotedEdgeLine(p1: g.0, c1: g.1, c2: g.2, p2: g.3, weight: promoted.weight)
+                        .modifier(CardClip(window: edgeClipScreen(from: promoted.from, to: promoted.to)))
                 }
             }
         }
@@ -479,7 +493,9 @@ struct CanvasView: View {
             // Ghost connectors first, so a ghost box draws over its own dangling endpoints.
             ForEach(model.historyGhostEdges) { ghost in
                 if let g = edgeGeometry(BoardEdge(from: ghost.from, to: ghost.to)) {
-                    GhostEdgeLine(p1: g.0, c1: g.1, c2: g.2, p2: g.3).transition(.opacity)
+                    GhostEdgeLine(p1: g.0, c1: g.1, c2: g.2, p2: g.3)
+                        .modifier(CardClip(window: edgeClipScreen(from: ghost.from, to: ghost.to)))
+                        .transition(.opacity)
                 }
             }
             ForEach(model.historyGhosts) { ghost in
@@ -1351,11 +1367,40 @@ struct NodeView: View {
                     .allowsHitTesting(false)
             }
         }
+        .overlay { scrollIndicators }
         .gesture(interiorMarqueeGesture)
         .gesture(
             SpatialTapGesture(count: 2, coordinateSpace: .local).onEnded { v in handleDoubleTap(at: interiorPoint(v.location)) }
                 .exclusively(before: SpatialTapGesture(count: 1).onEnded { _ in select() })
         )
+    }
+
+    /// Faint scroll thumbs on an open folder card whose content overflows the interior — the affordance
+    /// that says "there's more here, two-finger scroll to reach it". Each thumb is sized by the
+    /// interior/content ratio and positioned by the current scroll offset; never hit-tested.
+    @ViewBuilder private var scrollIndicators: some View {
+        let interior = model.cardInterior(of: node)
+        let content = model.contentExtent(of: node)
+        let scroll = node.scroll
+        GeometryReader { geo in
+            let overflowY = content.height - interior.height
+            let overflowX = content.width - interior.width
+            if overflowY > 0.5 {
+                let thumb = max(20, geo.size.height * interior.height / content.height)
+                let pos = -scroll.height / overflowY            // 0 == top … 1 == bottom
+                Capsule().fill(.secondary.opacity(0.3))
+                    .frame(width: 3 * scale, height: thumb)
+                    .position(x: geo.size.width - 3 * scale, y: thumb / 2 + (geo.size.height - thumb) * pos)
+            }
+            if overflowX > 0.5 {
+                let thumb = max(20, geo.size.width * interior.width / content.width)
+                let pos = -scroll.width / overflowX
+                Capsule().fill(.secondary.opacity(0.3))
+                    .frame(width: thumb, height: 3 * scale)
+                    .position(x: thumb / 2 + (geo.size.width - thumb) * pos, y: geo.size.height - 3 * scale)
+            }
+        }
+        .allowsHitTesting(false)
     }
 
     /// Drag inside a folder's interior = marquee its children (same rule as the canvas-background
@@ -1433,6 +1478,13 @@ struct NodeView: View {
             }
             Button(node.isExpanded ? "Close Folder Note" : "Open Folder Note") {
                 withAnimation(gappSpring) { model.toggleExpand(node.id) }
+            }
+            // One-click "shrink this card back to the compact default" — tames a folder whose card was
+            // seeded to its full open footprint (the v2→v3 migration) into a scroll viewport. Only shown
+            // when the open card is actually bigger than compact.
+            if !node.isCollapsedFolder,
+               node.width > AppModel.folderSize.width || node.height > AppModel.folderSize.height {
+                Button("Compact Card") { withAnimation(gappSpring) { model.compactCard(node.id) } }
             }
         }
         Divider()

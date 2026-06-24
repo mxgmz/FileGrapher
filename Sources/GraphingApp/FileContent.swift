@@ -26,9 +26,11 @@ struct FilePeekOverlay: View {
     private let cardWidth: CGFloat = 460
     private var cardHeight: CGFloat { min(max(model.viewport.height - 56, 240), 660) }
 
-    /// Place the card beside the box, clamped to stay fully on the canvas.
+    /// Place the card beside the box, clamped to stay fully on the canvas. Uses `displayedFrame` (not
+    /// `effectiveFrame`) so a peek on a child inside a scrolled folder anchors to where the box is
+    /// actually drawn, not its un-scrolled layout slot.
     private func cardCenter(for node: BoardNode) -> CGPoint {
-        let f = model.effectiveFrame(of: node)
+        let f = model.displayedFrame(of: node)
         let c = model.worldToScreen(CGPoint(x: f.midX, y: f.midY))
         let halfBoxW = f.width * model.zoom / 2
         let margin: CGFloat = 16
