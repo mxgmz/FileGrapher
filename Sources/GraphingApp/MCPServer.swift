@@ -188,9 +188,12 @@ final class MCPServer {
                 }
                 let spokes = (args["spokeIds"] as? [Any] ?? []).compactMap { Self.uuid($0) }
                 guard !spokes.isEmpty else { return reply(.failure(ToolError("arrange needs a non-empty 'spokeIds'"))) }
-                // Minimal-motion (VISION §4 law 2): only nudge spokes that aren't already at their slot.
-                model.arrangeRadialMinimalMotion(hub: hub, spokes: spokes)
-                reply(.success(Self.toolText("Arranged \(spokes.count) spoke(s) radially around the hub (unchanged-enough spokes left put).")))
+                // Layout-switching ("per topology"): an explicit radial/grid/columns, or "auto" (default) to
+                // pick from the link graph. Minimal-motion either way (unchanged-enough boxes stay put).
+                let layoutArg = (args["layout"] as? String)?.lowercased() ?? "auto"
+                let layout = AppModel.ArrangeLayout(rawValue: layoutArg) ?? model.autoLayout(hub: hub, spokes: spokes)
+                model.arrange(hub: hub, spokes: spokes, layout: layout)
+                reply(.success(Self.toolText("Arranged \(spokes.count) spoke(s) in a \(layout.rawValue) layout (unchanged-enough boxes left put).")))
 
             case "canvas_expand", "canvas_collapse":
                 guard let id = Self.uuid(args["id"]), let target = model.node(id) else {
@@ -332,12 +335,13 @@ final class MCPServer {
         ],
         [
             "name": "canvas_arrange",
-            "description": "Lay spokes out radially around a hub box and expand the hub. The app owns placement — you supply intent, not coordinates.",
+            "description": "Lay spokes out around a hub box (and expand the hub) in a chosen layout. The app owns placement — you supply intent, not coordinates. Minimal-motion: boxes already in place don't move.",
             "inputSchema": [
                 "type": "object",
                 "properties": [
-                    "hubId": ["type": "string", "description": "The box at the center."],
-                    "spokeIds": ["type": "array", "items": ["type": "string"], "description": "Boxes to ring around the hub."],
+                    "hubId": ["type": "string", "description": "The box at the center / anchor."],
+                    "spokeIds": ["type": "array", "items": ["type": "string"], "description": "Boxes to arrange around the hub."],
+                    "layout": ["type": "string", "enum": ["auto", "radial", "grid", "columns"], "description": "How to lay them out: 'auto' (default) picks per link topology; 'radial' ring; 'grid' block of peers; 'columns' stack for a sequence."],
                 ],
                 "required": ["hubId", "spokeIds"],
             ],
@@ -409,26 +413,25 @@ extension AppModel {
         transaction { setPosition(newNode, to: free) }   // one ⌘Z reverses the gravity nudge
     }
 
-    /// Minimal-motion (law 2): re-arrange spokes radially around `hub`, but **only move the ones that must
-    /// move** — a spoke already within `arrangeSettleRadius` of its computed slot is left exactly where it
-    /// is. Mirrors `AppModel.arrangeRadial`'s geometry; the one change is the skip-if-close guard. Spokes are
-    /// matched to their *nearest* target slot first so we don't reshuffle an already-tidy ring.
-    func arrangeRadialMinimalMotion(hub hubId: UUID, spokes spokeIds: [UUID]) {
+    /// The layouts the cartographer can switch between *per topology* (the agent-cartographer
+    /// "layout-switching" behavior / VISION-folder-canvas §5): a hub-and-spoke `radial` ring, a flat
+    /// `grid` of peers, or a `columns` stack for a sequence. `autoLayout` picks one from the link graph.
+    enum ArrangeLayout: String { case radial, grid, columns }
+
+    /// Arrange `spokeIds` around `hub` in the given `layout`, **minimal-motion**: each spoke is matched to
+    /// its nearest target slot and only moved if it's farther than `arrangeSettleRadius` (so re-running a
+    /// tidy layout is a no-op), then overlaps settle. The placement is shared across all three layouts —
+    /// only the slot geometry differs. One undoable step.
+    func arrange(hub hubId: UUID, spokes spokeIds: [UUID], layout: ArrangeLayout) {
         guard node(hubId) != nil, !spokeIds.isEmpty else { return }
         transaction {
             setExpanded(hubId, true)
             guard let hub = node(hubId) else { return }   // re-read: expanding can resize the card
-            let center = hub.center
-            let hubFrame = effectiveFrame(of: hub)
-            let hubReach = max(hubFrame.width, hubFrame.height) / 2
-            let spokeReach = spokeIds.compactMap { node($0) }.map { max($0.width, $0.height) / 2 }.max() ?? 0
-            let gap: CGFloat = 80
-            let clearance = hubReach + spokeReach + gap
-            let crowding = CGFloat(spokeIds.count) * (spokeReach * 2 + gap) / (2 * .pi)
-            let radius = max(clearance, crowding)
-            let slots = (0..<spokeIds.count).map { i -> CGPoint in
-                let angle = Double(i) / Double(spokeIds.count) * 2 * .pi - .pi / 2   // first slot at 12 o'clock
-                return CGPoint(x: center.x + radius * CGFloat(cos(angle)), y: center.y + radius * CGFloat(sin(angle)))
+            let slots: [CGPoint]
+            switch layout {
+            case .radial:  slots = radialSlots(around: hub, spokes: spokeIds)
+            case .grid:    slots = gridSlots(around: hub, spokes: spokeIds)
+            case .columns: slots = columnSlots(around: hub, spokes: spokeIds)
             }
             for (spoke, slot) in AppModel.assignToNearestSlots(spokeIds, slots, center: { self.node($0)?.center }) {
                 guard let current = node(spoke)?.center else { continue }
@@ -439,6 +442,64 @@ extension AppModel {
             }
             resolveOverlaps(movedId: hubId)
         }
+    }
+
+    /// Back-compat shim — radial was the only layout the original call site used.
+    func arrangeRadialMinimalMotion(hub hubId: UUID, spokes spokeIds: [UUID]) {
+        arrange(hub: hubId, spokes: spokeIds, layout: .radial)
+    }
+
+    /// Pick a layout from the link topology (the cartographer's "per topology" smarts): a hub linked to
+    /// most of its spokes → `radial`; else a chain through the spokes → `columns`; else a flat set →
+    /// `grid`. ponytail: a coarse heuristic on edge counts — the agent can always override via `layout`.
+    func autoLayout(hub hubId: UUID, spokes spokeIds: [UUID]) -> ArrangeLayout {
+        let spokeSet = Set(spokeIds)
+        let linkedToHub = Set(board.edges.compactMap { edge -> UUID? in
+            if edge.from == hubId, spokeSet.contains(edge.to) { return edge.to }
+            if edge.to == hubId, spokeSet.contains(edge.from) { return edge.from }
+            return nil
+        })
+        if linkedToHub.count >= max(2, (spokeIds.count + 1) / 2) { return .radial }   // genuine hub-and-spoke
+        let interSpoke = board.edges.filter { spokeSet.contains($0.from) && spokeSet.contains($0.to) }.count
+        if spokeIds.count >= 3, interSpoke >= spokeIds.count - 1 { return .columns }  // a chain / sequence
+        return .grid
+    }
+
+    /// Hub radius (half its larger side) — shared spacing input.
+    private func hubReach(_ hub: BoardNode) -> CGFloat { let f = effectiveFrame(of: hub); return max(f.width, f.height) / 2 }
+    /// Largest spoke half-extent — the other shared spacing input.
+    private func spokeReach(_ spokes: [UUID]) -> CGFloat {
+        spokes.compactMap { node($0) }.map { max($0.width, $0.height) / 2 }.max() ?? 0
+    }
+
+    /// Radial: an evenly-spaced ring around the hub, first slot at 12 o'clock; radius sized so neither the
+    /// hub nor crowded spokes overlap. (The geometry Lane C shipped, now one layout among three.)
+    private func radialSlots(around hub: BoardNode, spokes spokeIds: [UUID]) -> [CGPoint] {
+        let center = hub.center, reach = spokeReach(spokeIds), gap: CGFloat = 80
+        let radius = max(hubReach(hub) + reach + gap, CGFloat(spokeIds.count) * (reach * 2 + gap) / (2 * .pi))
+        return (0..<spokeIds.count).map { i in
+            let angle = Double(i) / Double(spokeIds.count) * 2 * .pi - .pi / 2
+            return CGPoint(x: center.x + radius * CGFloat(cos(angle)), y: center.y + radius * CGFloat(sin(angle)))
+        }
+    }
+
+    /// Grid: a roughly-square block of cells centered under the hub (row-major) — a flat set of peers.
+    private func gridSlots(around hub: BoardNode, spokes spokeIds: [UUID]) -> [CGPoint] {
+        let reach = spokeReach(spokeIds), gap: CGFloat = 80, cell = reach * 2 + gap
+        let count = spokeIds.count
+        let cols = max(1, Int(ceil(Double(count).squareRoot())))
+        let firstY = hub.center.y + hubReach(hub) + gap + reach          // first row just below the hub
+        let startX = hub.center.x - CGFloat(cols - 1) * cell / 2          // block centered on the hub
+        return (0..<count).map { i in
+            CGPoint(x: startX + CGFloat(i % cols) * cell, y: firstY + CGFloat(i / cols) * cell)
+        }
+    }
+
+    /// Columns: a single vertical stack directly below the hub — a sequence / list.
+    private func columnSlots(around hub: BoardNode, spokes spokeIds: [UUID]) -> [CGPoint] {
+        let reach = spokeReach(spokeIds), gap: CGFloat = 80, cell = reach * 2 + gap
+        let firstY = hub.center.y + hubReach(hub) + gap + reach
+        return (0..<spokeIds.count).map { i in CGPoint(x: hub.center.x, y: firstY + CGFloat(i) * cell) }
     }
 
     /// A spoke already this close (world units) to its target slot is "tidy enough" — leave it put rather
