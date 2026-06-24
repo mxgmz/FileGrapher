@@ -132,7 +132,13 @@ final class MCPServer {
             guard let model else { return reply(.failure(ToolError("App model unavailable"))) }
             switch name {
             case "canvas_get":
-                reply(.success(Self.toolText(Self.boardJSON(model, dir: args["dir"] as? String))))
+                let depth = max(1, (args["depth"] as? Int) ?? 1)
+                let maxNodes = max(1, (args["maxNodes"] as? Int) ?? 800)
+                reply(.success(Self.toolText(Self.boardJSON(model, dir: args["dir"] as? String, depth: depth, maxNodes: maxNodes))))
+
+            case "canvas_health":
+                let data = (try? JSONSerialization.data(withJSONObject: model.boardHealth(), options: [.prettyPrinted, .sortedKeys])) ?? Data()
+                reply(.success(Self.toolText(String(data: data, encoding: .utf8) ?? "{}")))
 
             case "canvas_create_note":
                 guard model.vault != nil else { return reply(.failure(ToolError("No vault is open"))) }
@@ -252,26 +258,42 @@ final class MCPServer {
         (value as? String).flatMap { UUID(uuidString: $0) }
     }
 
-    /// The map the agent reasons over — nodes + edges as a JSON string. Optionally scoped to one folder.
-    @MainActor private static func boardJSON(_ model: AppModel, dir: String?) -> String {
+    /// The map the agent reasons over — nodes + edges as a JSON string. Optionally scoped to one folder,
+    /// `depth` levels deep (1 == direct children, the default), and capped at `maxNodes` so a huge vault
+    /// can be read altitude-by-altitude instead of as one giant payload (the parked big-vault concern).
+    /// When the scope yields more than `maxNodes`, the result is truncated and flagged `truncated: true`.
+    @MainActor private static func boardJSON(_ model: AppModel, dir: String?, depth: Int = 1, maxNodes: Int = 800) -> String {
         let scope = dir?.isEmpty == false ? dir : nil
-        let nodes: [[String: Any]] = model.board.nodes
-            .filter { scope == nil || $0.parentRel == scope! }
-            .map { node in
-                [
-                    "id": node.id.uuidString, "kind": node.kind.rawValue, "name": node.name,
-                    "relPath": node.relPath, "parent": node.parentRel,
-                    "x": node.x, "y": node.y, "w": node.width, "h": node.height,
-                    "expanded": node.isExpanded, "collapsed": node.isCollapsedFolder, "pinned": node.isPinned,
-                ]
-            }
-        let edges: [[String: Any]] = model.board.edges.map { edge in
+        func inScope(_ node: BoardNode) -> Bool {
+            guard let scope else { return true }
+            if node.parentRel == scope { return true }                      // direct child
+            guard node.relPath.hasPrefix(scope + "/") else { return false }  // not under the scope at all
+            let below = node.relPath.dropFirst(scope.count + 1).split(separator: "/").count
+            return below <= depth                                            // within `depth` levels under scope
+        }
+        let matched = model.board.nodes.filter(inScope)
+        let nodes: [[String: Any]] = matched.prefix(maxNodes).map { node in
             [
-                "from": edge.from.uuidString, "to": edge.to.uuidString,
-                "label": edge.label ?? "", "linkBacked": edge.linkBacked ?? false,
+                "id": node.id.uuidString, "kind": node.kind.rawValue, "name": node.name,
+                "relPath": node.relPath, "parent": node.parentRel,
+                "x": node.x, "y": node.y, "w": node.width, "h": node.height,
+                "expanded": node.isExpanded, "collapsed": node.isCollapsedFolder, "pinned": node.isPinned,
             ]
         }
-        let payload: [String: Any] = ["nodes": nodes, "edges": edges]
+        // Only edges between two returned nodes (so a scoped/capped read stays self-consistent).
+        let shownIds = Set(matched.prefix(maxNodes).map(\.id))
+        let edges: [[String: Any]] = model.board.edges
+            .filter { shownIds.contains($0.from) && shownIds.contains($0.to) }
+            .map { edge in
+                [
+                    "from": edge.from.uuidString, "to": edge.to.uuidString,
+                    "label": edge.label ?? "", "linkBacked": edge.linkBacked ?? false,
+                ]
+            }
+        let payload: [String: Any] = [
+            "nodes": nodes, "edges": edges,
+            "totalInScope": matched.count, "truncated": matched.count > maxNodes,
+        ]
         let data = (try? JSONSerialization.data(withJSONObject: payload, options: [.prettyPrinted, .sortedKeys])) ?? Data()
         return String(data: data, encoding: .utf8) ?? "{}"
     }
@@ -279,11 +301,20 @@ final class MCPServer {
     private static let toolSchemas: [[String: Any]] = [
         [
             "name": "canvas_get",
-            "description": "Read the canvas: every box (id, kind, name, path, position, size, state) and every connector. Optionally scope to one folder by its relative path.",
+            "description": "Read the canvas: every box (id, kind, name, path, position, size, state) and every connector. Scope to one folder (`dir`), `depth` levels deep, capped at `maxNodes` — the result reports `totalInScope` and `truncated` so a huge vault can be read altitude-by-altitude.",
             "inputSchema": [
                 "type": "object",
-                "properties": ["dir": ["type": "string", "description": "Vault-relative folder path to scope to; omit for the whole board."]],
+                "properties": [
+                    "dir": ["type": "string", "description": "Vault-relative folder path to scope to; omit for the whole board."],
+                    "depth": ["type": "integer", "description": "Levels below `dir` to include (1 = direct children, the default)."],
+                    "maxNodes": ["type": "integer", "description": "Cap on returned boxes (default 800); the result flags `truncated` when exceeded."],
+                ],
             ],
+        ],
+        [
+            "name": "canvas_health",
+            "description": "Gardening diagnostic — structural signals the canvas is drifting out of legibility: orphan notes (no connectors), crowded folders, overlapping sibling boxes, and visual-only connectors (not real [[links]]). Read-only; use it to decide what to tidy, then act with arrange/move/link/collapse.",
+            "inputSchema": ["type": "object"],
         ],
         [
             "name": "canvas_create_note",
@@ -500,6 +531,57 @@ extension AppModel {
         let reach = spokeReach(spokeIds), gap: CGFloat = 80, cell = reach * 2 + gap
         let firstY = hub.center.y + hubReach(hub) + gap + reach
         return (0..<spokeIds.count).map { i in CGPoint(x: hub.center.x, y: firstY + CGFloat(i) * cell) }
+    }
+
+    /// A folder with more direct children than this reads as crowded — a candidate to sub-organize.
+    static let crowdedFolderLimit = 12
+
+    /// Read-only **gardening** diagnostic (the cartographer's custodial sense): structural signals that a
+    /// canvas is drifting out of legibility, computed purely from the board — no content read. The agent
+    /// calls this to decide *what* to tidy, then acts with the existing arrange/move/link/collapse tools.
+    /// - `orphans`: notes with no connector at all.
+    /// - `crowdedFolders`: folders past `crowdedFolderLimit` direct children.
+    /// - `overlaps`: visible sibling boxes whose drawn frames intersect (residual collisions to push apart).
+    /// - `unbackedConnectors`: note↔note edges not backed by a real `[[link]]` on disk (visual-only).
+    /// (A content-aware signal — prose `[[links]]` written but not yet drawn — needs a read-content tool; deferred.)
+    func boardHealth() -> [String: Any] {
+        func ref(_ n: BoardNode) -> [String: Any] { ["id": n.id.uuidString, "name": n.name, "relPath": n.relPath] }
+
+        let linked = Set(board.edges.flatMap { [$0.from, $0.to] })
+        let orphans = board.nodes.filter { $0.kind == .note && !linked.contains($0.id) }
+
+        let crowded = board.nodes.filter { $0.kind == .folder }.compactMap { folder -> [String: Any]? in
+            let children = board.nodes.filter { $0.parentRel == folder.relPath }.count
+            guard children > AppModel.crowdedFolderLimit else { return nil }
+            return ["id": folder.id.uuidString, "name": folder.name, "relPath": folder.relPath, "childCount": children]
+        }
+
+        // Overlaps matter only among VISIBLE siblings (a collapsed folder hides its children; children of
+        // different folders can't overlap in the layout sense). O(n²) per sibling group — fine at this
+        // scale; the reported list is capped below.
+        let hidden = hiddenNodeIds
+        let groups = Dictionary(grouping: board.nodes.filter { !hidden.contains($0.id) }) { $0.parentRel }
+        var overlaps: [[String: Any]] = []
+        for (_, siblings) in groups where siblings.count > 1 {
+            for i in 0..<siblings.count {
+                let fi = effectiveFrame(of: siblings[i])
+                for j in (i + 1)..<siblings.count where fi.intersects(effectiveFrame(of: siblings[j])) {
+                    overlaps.append(["a": siblings[i].name, "aId": siblings[i].id.uuidString,
+                                     "b": siblings[j].name, "bId": siblings[j].id.uuidString])
+                }
+            }
+        }
+
+        let noteIds = Set(board.nodes.filter { $0.kind == .note }.map { $0.id })
+        let unbacked = board.edges.filter { !($0.linkBacked ?? false) && noteIds.contains($0.from) && noteIds.contains($0.to) }
+
+        return [
+            "orphans": orphans.prefix(100).map(ref), "orphanCount": orphans.count,
+            "crowdedFolders": crowded,
+            "overlaps": Array(overlaps.prefix(100)), "overlapCount": overlaps.count,
+            "unbackedConnectors": unbacked.prefix(100).map { ["from": $0.from.uuidString, "to": $0.to.uuidString] },
+            "unbackedConnectorCount": unbacked.count,
+        ]
     }
 
     /// A spoke already this close (world units) to its target slot is "tidy enough" — leave it put rather
