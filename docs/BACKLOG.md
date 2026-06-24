@@ -40,10 +40,18 @@ Scrum-style board. **Status legend:** ✅ done · 🔄 in progress · ⬜ todo �
   canvas_screenshot → repeat`, whitelisted to layout-only tools. Demoed on a throwaway vault: collapsed crowded
   folders + radial-clustered loose notes, self-corrected off its screenshot, **content hashes identical
   before/after**. Confirmed the limit: orphans can't drop without content-reading → perception is the unlock.
-- ⬜ **Perception (`canvas_read`)** then **authoring (`canvas_write`)** — the deferred unlocks for *meaning-
-  aware* organization + synthesis. `canvas_get` is structure-only today; agents can't read or write note
-  content. Perception is the single biggest unlock (content-aware health, semantic linking). Authoring must
-  honor the no-prose-clobber law (managed `<!-- canvas-links -->` block / folder-notes / `saveFileContent`).
+- ✅ **Perception (`canvas_read`) (S31, PR #24)** — the unlock for *meaning-aware* work. Read-only tool:
+  note **content** (capped `text` + `chars`/`truncated`) + the intended **link graph** (`links` = every
+  `[[wikilink]]` in the full text, alias/heading stripped). Select by `ids` (e.g. the orphans `canvas_health`
+  flagged) or `dir`/`depth` scope; folders skipped; `maxNotes`/`maxChars` bound the payload. Trust boundary:
+  **no free-form path arg** — reads only board-tracked nodes under the vault. All MCP-shape assembly in
+  `MCPServer.swift` (`readJSON` + shared `scopedNodes` lifted from `boardJSON`), prose scan in
+  `ManagedLinks.wikilinkTargets`. `Tests/PerceptionTests`; live-verified on the throwaway vault (scope, cap,
+  ids, links). **Not wired into `run-garden.sh`** — the layout custodian stays content-blind; `canvas_read`
+  joins a broader allow-list only alongside authoring.
+- ⬜ **Authoring (`canvas_write`)** — the second half of meaning-aware work: write folder-notes / summaries /
+  semantic links. Must honor the no-prose-clobber law (managed `<!-- canvas-links -->` block / folder-notes /
+  `saveFileContent`). The riskier piece (it mutates content) — build on perception.
 
 ### Epic B — Folders Are Canvases (the spatial foundation)
 **Specs:** `VISION-folder-canvas.md` + `SPEC-folder-canvas.md`. **Specced, not built.** Prereq for proper

@@ -5,7 +5,41 @@ open questions. At a session's start, read the top entry to pick up where we lef
 
 ---
 
-## ▶ NEXT SESSION — START HERE · S30 — **3 lanes + card polish + Phase 3 preview + cartographer layout-switching + gardening infra + the gardening LOOP SHIPPED. Next: perception (`canvas_read`) — the unlock for meaning-aware work.**
+## ▶ NEXT SESSION — START HERE · S31 — **Perception shipped (`canvas_read`). Agents can now read note content + the intended link graph. Next: authoring (`canvas_write`).**
+
+> 👁️ **S31 — Perception (`canvas_read`), PR #24.** The single biggest unlock from the "right work" call: agents
+> were *semantically blind* (`canvas_get` is layout-only). Now a read-only **`canvas_read`** returns note
+> **content** (capped `text` + `chars`/`truncated`) and the intended **link graph** (`links` = every
+> `[[wikilink]]` in the *full* text — so links survive the content cap — alias/heading stripped). Select boxes
+> by `ids` (the "read the orphans `canvas_health` flagged" path) or by `dir`/`depth` scope (mirrors
+> `canvas_get`); folders are skipped (no content); `maxNotes` (25) + `maxChars` (2000) bound the payload.
+> **Trust boundary by design:** no free-form `path` arg — the agent selects only board-tracked nodes, so reads
+> can't escape the vault, and it's content-**read-only** (never writes). Lazy/convention notes: no new file or
+> `AppModel` state — it's MCP-shape assembly, so it lives in `MCPServer.swift` next to `boardJSON`/`boardHealth`
+> (`readJSON` + a shared `scopedNodes` lifted out of `boardJSON` so canvas_get/canvas_read scope by one rule);
+> the prose `[[…]]` scan went into its natural home `ManagedLinks.wikilinkTargets` (Links.swift), reusing the
+> alias-strip from `target(inLine:)`. Skipped (YAGNI): tags, backlinks, summaries, a separate graph tool.
+> `Tests/PerceptionTests` (wikilink parse + content cap) + **live-verified** on the throwaway vault
+> (`/tmp/gapp-garden`): scope+cap (23 in scope → 3 returned, `truncated`), per-note `maxChars` cut, `ids`
+> selection, and `[[Alpha]]`/`[[Beta|b]]` → `["Alpha","Beta"]`. **main after merge; build clean; all suites pass.**
+> **`run-garden.sh` deliberately unchanged** — the layout custodian stays content-blind; `canvas_read` joins a
+> broader allow-list only alongside `canvas_write`.
+
+> ⏭️ **Next: authoring (`canvas_write`)** — write folder-notes / summaries / semantic links, honoring the
+> no-prose-clobber law (managed `<!-- canvas-links -->` block via `ManagedLinks.write`, or `saveFileContent`
+> for body prose). The riskier half (it mutates content); perception is now the foundation under it. Once it
+> lands, build the *meaning-aware* custodian: a new allow-list = layout tools + `canvas_read` + `canvas_write`,
+> so the agent can finally drop the orphans by linking them by meaning (the limit the gardening demo hit).
+
+> ⚠️ **Verify note (S31):** `canvas_read` was exercised over real HTTP on the throwaway vault, not on
+> `recordentaln8n` (the freshly-built bundle hits the ~/Documents TCC wall on relaunch, so `restoreLastVault`
+> lands on WelcomeView and the in-app MCP server never starts). To smoke-test on the real vault, grant the new
+> bundle Documents access (or use the verification-constraint recipe), then call `canvas_read` via
+> `scratchpad/mcp2.py <vault>/.graphingapp/mcp.json canvas_read '{...}'`.
+
+---
+
+## S30 — **3 lanes + card polish + Phase 3 preview + cartographer layout-switching + gardening infra + the gardening LOOP SHIPPED. Next: perception (`canvas_read`) — the unlock for meaning-aware work.**
 
 > 🧭 **Agent "right work" — decided this session.** Assessed whether agents have enough tools to do the
 > real work. Verdict: they have **good hands** (create/link/move/arrange×4/expand/collapse/resize/color) and

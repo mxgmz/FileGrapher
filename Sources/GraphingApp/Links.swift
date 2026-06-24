@@ -12,11 +12,26 @@ enum ManagedLinks {
     static let closeMarker = "<!-- /canvas-links -->"
 
     /// Wikilink targets listed in `text`'s managed block, in listed order (empty when there's no
-    /// block). Only the managed block is read here; prose wikilinks elsewhere are the read-side's job.
+    /// block). Only the managed block is read here; for every `[[link]]` in the prose use
+    /// `wikilinkTargets(in:)`.
     static func targets(in text: String) -> [String] {
         let lines = text.components(separatedBy: "\n")
         guard let block = blockRange(in: lines) else { return [] }
         return lines[block].compactMap(target(inLine:))
+    }
+
+    /// Every `[[wikilink]]` target anywhere in `text` (prose included), in document order, deduplicated
+    /// — the read-side's view of a note's *intended* graph (vs. `targets`, which reads only the managed
+    /// block). Alias/heading anchors are stripped, like `target(inLine:)`.
+    static func wikilinkTargets(in text: String) -> [String] {
+        var found: [String] = []
+        var cursor = text.startIndex
+        while let open = text.range(of: "[[", range: cursor..<text.endIndex),
+              let close = text.range(of: "]]", range: open.upperBound..<text.endIndex) {
+            if let target = strip(String(text[open.upperBound..<close.lowerBound])) { found.append(target) }
+            cursor = close.upperBound
+        }
+        return deduplicated(found)
     }
 
     /// `text` with its managed block rewritten to list exactly `targets` (deduplicated, order
@@ -58,8 +73,13 @@ enum ManagedLinks {
         guard let open = line.range(of: "[["),
               let close = line.range(of: "]]", range: open.upperBound..<line.endIndex)
         else { return nil }
-        var inner = String(line[open.upperBound..<close.lowerBound])
-        // Strip an Obsidian alias or heading anchor: [[Target|Alias]] / [[Target#Heading]].
+        return strip(String(line[open.upperBound..<close.lowerBound]))
+    }
+
+    /// A wikilink's inner text reduced to its target: an Obsidian alias or heading anchor is dropped
+    /// (`Target|Alias` / `Target#Heading` → "Target"), then trimmed. Nil when nothing's left.
+    private static func strip(_ inner: String) -> String? {
+        var inner = inner
         if let bar = inner.firstIndex(of: "|") { inner = String(inner[..<bar]) }
         if let hash = inner.firstIndex(of: "#") { inner = String(inner[..<hash]) }
         let trimmed = inner.trimmed

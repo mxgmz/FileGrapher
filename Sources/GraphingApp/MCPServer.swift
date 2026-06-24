@@ -140,6 +140,13 @@ final class MCPServer {
                 let data = (try? JSONSerialization.data(withJSONObject: model.boardHealth(), options: [.prettyPrinted, .sortedKeys])) ?? Data()
                 reply(.success(Self.toolText(String(data: data, encoding: .utf8) ?? "{}")))
 
+            case "canvas_read":
+                let ids = (args["ids"] as? [Any])?.compactMap { $0 as? String }
+                let depth = max(1, (args["depth"] as? Int) ?? 1)
+                let maxNotes = max(1, (args["maxNotes"] as? Int) ?? 25)
+                let maxChars = max(1, (args["maxChars"] as? Int) ?? 2000)
+                reply(.success(Self.toolText(Self.readJSON(model, ids: ids, dir: args["dir"] as? String, depth: depth, maxNotes: maxNotes, maxChars: maxChars))))
+
             case "canvas_create_note":
                 guard model.vault != nil else { return reply(.failure(ToolError("No vault is open"))) }
                 let dir = args["parentDir"] as? String ?? ""
@@ -263,15 +270,7 @@ final class MCPServer {
     /// can be read altitude-by-altitude instead of as one giant payload (the parked big-vault concern).
     /// When the scope yields more than `maxNodes`, the result is truncated and flagged `truncated: true`.
     @MainActor private static func boardJSON(_ model: AppModel, dir: String?, depth: Int = 1, maxNodes: Int = 800) -> String {
-        let scope = dir?.isEmpty == false ? dir : nil
-        func inScope(_ node: BoardNode) -> Bool {
-            guard let scope else { return true }
-            if node.parentRel == scope { return true }                      // direct child
-            guard node.relPath.hasPrefix(scope + "/") else { return false }  // not under the scope at all
-            let below = node.relPath.dropFirst(scope.count + 1).split(separator: "/").count
-            return below <= depth                                            // within `depth` levels under scope
-        }
-        let matched = model.board.nodes.filter(inScope)
+        let matched = scopedNodes(model, dir: dir, depth: depth)
         let nodes: [[String: Any]] = matched.prefix(maxNodes).map { node in
             [
                 "id": node.id.uuidString, "kind": node.kind.rawValue, "name": node.name,
@@ -298,6 +297,51 @@ final class MCPServer {
         return String(data: data, encoding: .utf8) ?? "{}"
     }
 
+    /// Nodes within `dir` (nil/empty = whole board), `depth` levels deep (1 = direct children). Shared by
+    /// `boardJSON` (canvas_get) and `readJSON` (canvas_read) so both scope by one rule.
+    @MainActor private static func scopedNodes(_ model: AppModel, dir: String?, depth: Int) -> [BoardNode] {
+        guard let scope = (dir?.isEmpty == false) ? dir : nil else { return model.board.nodes }
+        return model.board.nodes.filter { node in
+            if node.parentRel == scope { return true }                      // direct child
+            guard node.relPath.hasPrefix(scope + "/") else { return false }  // not under the scope at all
+            let below = node.relPath.dropFirst(scope.count + 1).split(separator: "/").count
+            return below <= depth                                            // within `depth` levels under scope
+        }
+    }
+
+    /// Perception: the actual *content* of notes plus their intended link graph — what `canvas_get`
+    /// (layout only) can't see. Selected by explicit `ids` or by `dir`/`depth` scope; folders are skipped
+    /// (no content). Each note's text is capped at `maxChars` and the set at `maxNotes` to bound the
+    /// payload (`chars`/`truncated` flag what was cut). `links` is every `[[wikilink]]` in the *full*
+    /// text, so the intended graph survives the content cap. Read-only — never writes a file.
+    @MainActor private static func readJSON(_ model: AppModel, ids: [String]?, dir: String?, depth: Int, maxNotes: Int, maxChars: Int) -> String {
+        let scoped: [BoardNode]
+        if let ids, !ids.isEmpty {                                          // explicit selection wins over scope
+            let wanted = Set(ids.compactMap { UUID(uuidString: $0) })
+            scoped = model.board.nodes.filter { wanted.contains($0.id) }
+        } else {
+            scoped = scopedNodes(model, dir: dir, depth: depth)
+        }
+        let readable = scoped.filter { $0.kind != .folder }
+        let notes: [[String: Any]] = readable.prefix(maxNotes).map { node in
+            let full = model.fileText(node.id)
+            let truncated = full.count > maxChars
+            return [
+                "id": node.id.uuidString, "kind": node.kind.rawValue, "name": node.name,
+                "relPath": node.relPath,
+                "text": truncated ? String(full.prefix(maxChars)) : full,
+                "chars": full.count, "truncated": truncated,
+                "links": ManagedLinks.wikilinkTargets(in: full),
+            ]
+        }
+        let payload: [String: Any] = [
+            "notes": notes,
+            "totalInScope": readable.count, "truncated": readable.count > maxNotes,
+        ]
+        let data = (try? JSONSerialization.data(withJSONObject: payload, options: [.prettyPrinted, .sortedKeys])) ?? Data()
+        return String(data: data, encoding: .utf8) ?? "{}"
+    }
+
     private static let toolSchemas: [[String: Any]] = [
         [
             "name": "canvas_get",
@@ -315,6 +359,20 @@ final class MCPServer {
             "name": "canvas_health",
             "description": "Gardening diagnostic — structural signals the canvas is drifting out of legibility: orphan notes (no connectors), crowded folders, overlapping sibling boxes, and visual-only connectors (not real [[links]]). Read-only; use it to decide what to tidy, then act with arrange/move/link/collapse.",
             "inputSchema": ["type": "object"],
+        ],
+        [
+            "name": "canvas_read",
+            "description": "Perception — read what notes actually say (content) plus their intended link graph, which canvas_get (layout only) can't see. Select boxes by `ids` (e.g. the orphans canvas_health flagged) or by `dir`/`depth` scope. Each note returns capped `text` (with `chars`/`truncated`) and `links` (every [[wikilink]] in the full text). Use this to group or link notes BY MEANING. Read-only; never edits a file.",
+            "inputSchema": [
+                "type": "object",
+                "properties": [
+                    "ids": ["type": "array", "items": ["type": "string"], "description": "Box ids to read; takes precedence over dir/depth. Omit to read by scope."],
+                    "dir": ["type": "string", "description": "Vault-relative folder to scope to (when no `ids`); omit for the whole board."],
+                    "depth": ["type": "integer", "description": "Levels below `dir` to include (1 = direct children, the default)."],
+                    "maxNotes": ["type": "integer", "description": "Cap on returned notes (default 25); the result flags `truncated` when exceeded."],
+                    "maxChars": ["type": "integer", "description": "Per-note content cap (default 2000); each note flags its own `truncated`."],
+                ],
+            ],
         ],
         [
             "name": "canvas_create_note",
