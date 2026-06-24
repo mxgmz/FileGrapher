@@ -501,6 +501,49 @@ final class AppModel: ObservableObject {
         return true
     }
 
+    /// One-time **v2 → v3 migration** (Folder-Canvas Phase 2, folder-as-card): seed each folder's stored
+    /// card frame from its CURRENT auto-grown frame, so retiring auto-grow renders identically on first
+    /// open. Same snapshot-preserves-nesting trick as `migrateToRelativeIfNeeded`: compute every folder's
+    /// old footprint on the pre-mutation board, then for each folder move its WORLD center onto that
+    /// footprint's center and counter-shift its direct children by the same delta. Net effect: nothing's
+    /// rendered position moves — a leaf's `worldCenter` is preserved, and a folder's `worldFrame` becomes
+    /// its old auto-grown frame (the folder's OWN center intentionally shifts onto that off-center
+    /// footprint, which is the whole point — it now IS the card). No-op once `version >= 3`. Run right
+    /// after `migrateToRelativeIfNeeded`; resave when it runs.
+    @discardableResult
+    func seedFolderCardsIfNeeded() -> Bool {
+        guard board.version < 3 else { return false }
+        let folderIDs = board.nodes.filter { $0.kind == .folder }.map { $0.id }
+        // Snapshot each folder's OPEN auto-grown footprint on the CURRENT board, before any move. Open
+        // (asOpenCard) so a COLLAPSED folder's card is seeded to its content extent — the size it must
+        // expand back to — not its collapsed header strip (which would render fine but expand to nothing).
+        let grown = Dictionary(uniqueKeysWithValues:
+            board.nodes.filter { $0.kind == .folder }.map { ($0.id, legacyAutoGrownFrame(of: $0, asOpenCard: true)) })
+        // Iterate by id and re-read the LIVE node each pass: a folder may already have been counter-shifted
+        // by its parent's seed, so `worldCenter` must read the current board, never a stale pre-loop copy.
+        for id in folderIDs {
+            guard let index = board.nodes.firstIndex(where: { $0.id == id }), let target = grown[id] else { continue }
+            let folder = board.nodes[index]
+            // delta moves the folder's WORLD center onto the footprint's center.
+            let worldBefore = worldCenter(of: folder)
+            let delta = CGPoint(x: target.midX - worldBefore.x, y: target.midY - worldBefore.y)
+            board.nodes[index].width = AppModel.clampSize(target.width, fallback: gappDefaultNoteSize.width)
+            board.nodes[index].height = AppModel.clampSize(target.height, fallback: gappDefaultNoteSize.height)
+            // F's stored center is RELATIVE; shifting it by delta moves F's world center by delta too.
+            board.nodes[index].center = CGPoint(x: AppModel.clampCoord(board.nodes[index].x + delta.x),
+                                                y: AppModel.clampCoord(board.nodes[index].y + delta.y))
+            // Counter-shift each DIRECT child so its (and its subtree's) world position is preserved.
+            for child in directChildren(of: folder.relPath) {
+                guard let childIndex = board.nodes.firstIndex(where: { $0.id == child.id }) else { continue }
+                board.nodes[childIndex].center = CGPoint(x: AppModel.clampCoord(board.nodes[childIndex].x - delta.x),
+                                                         y: AppModel.clampCoord(board.nodes[childIndex].y - delta.y))
+            }
+        }
+        board.version = 3
+        Log.disk.notice("Migrated board.json to v3 (folder cards) — seeded \(folderIDs.count, privacy: .public) folders.")
+        return true
+    }
+
     /// Repair any non-finite / out-of-range geometry already in `board` (e.g. a corrupt board.json
     /// with runaway coordinates). Returns true if anything was changed. A blunt clamp — it may stack
     /// previously-exploded boxes near the world edge, but it guarantees the board can always open
@@ -718,11 +761,15 @@ final class AppModel: ObservableObject {
         board = v.loadBoard()
         // Migrate global→relative coords FIRST (v1→v2), before anything derives a world position.
         let migrated = migrateToRelativeIfNeeded()
+        // Then seed folder cards (v2→v3): freeze each folder's current auto-grown frame as its stored
+        // card, so retiring auto-grow renders identically. Runs after the relative migration (it relies
+        // on worldCenter being correct) and on the same resave.
+        let seeded = seedFolderCardsIfNeeded()
         // Self-heal a corrupt board before it can hang or become unusable: clamp runaway coords, then
         // pull any stranded folder child back so no folder auto-grows to an unclickable size.
         let repaired = sanitizeBoardGeometry()
         let healed = reinInStrandedChildren()
-        if migrated || repaired || healed { v.saveBoard(board) }
+        if migrated || seeded || repaired || healed { v.saveBoard(board) }
         UserDefaults.standard.set(url.path, forKey: defaultsKey)
         clearHistory()
         syncFromDisk()
@@ -1553,10 +1600,37 @@ final class AppModel: ObservableObject {
 
     private func effectiveFrame(of node: BoardNode, visited: inout Set<String>, depth: Int) -> CGRect {
         guard node.kind == .folder else { return worldFrame(of: node) }
-        // Collapsed: short-circuit the (hot, recursive) auto-grow — a collapsed folder is just its
-        // header strip + count badge; its children are hidden, so they never widen the frame.
+        // Folder-as-card (Folder-Canvas Phase 2): a folder's footprint is now its own stored card
+        // frame — a fixed viewport — NOT a union of its contents. Auto-grow is retired (its old union
+        // lives on in `legacyAutoGrownFrame`, used only by the v2→v3 seed). Collapsed still collapses.
         if node.isCollapsedFolder { return collapsedFrame(of: node) }
-        // Cycle / runaway guard: bail loudly rather than recurse into an infinite loop.
+        // Cycle / runaway guard, kept intact even though the recursion is gone: a corrupt board (a
+        // folder that is its own ancestor) must still bail loudly instead of spinning, and a later PR
+        // may reintroduce recursion here.
+        guard depth < AppModel.maxFolderDepth, visited.insert(node.relPath).inserted else {
+            warnFolderCycle(at: node.relPath, depth: depth)
+            return worldFrame(of: node)
+        }
+        return worldFrame(of: node)
+    }
+
+    /// The OLD auto-grow footprint: a folder's stored frame unioned with its children's own
+    /// auto-grown frames (plus padding + header), collapsed folders short-circuiting to their header.
+    /// A faithful replica of the pre-Phase-2 `effectiveFrame` behavior, kept ONLY so the v2→v3 seed
+    /// migration can snapshot what each folder used to display before retiring auto-grow.
+    ///
+    /// `asOpenCard` forces the TOP folder open even when it's collapsed: the seed needs a folder's OPEN
+    /// content extent for its card size (the size it must expand back to), which is distinct from its
+    /// collapsed *rendering* (`effectiveFrame` → `collapsedFrame`, the header strip). Nested children
+    /// still reflect their own actual collapse state, so a collapsed child contributes only its header.
+    func legacyAutoGrownFrame(of node: BoardNode, asOpenCard: Bool = false) -> CGRect {
+        var visited = Set<String>()
+        return legacyAutoGrownFrame(of: node, visited: &visited, depth: 0, asOpenCard: asOpenCard)
+    }
+
+    private func legacyAutoGrownFrame(of node: BoardNode, visited: inout Set<String>, depth: Int, asOpenCard: Bool) -> CGRect {
+        guard node.kind == .folder else { return worldFrame(of: node) }
+        if node.isCollapsedFolder && !asOpenCard { return collapsedFrame(of: node) }
         guard depth < AppModel.maxFolderDepth, visited.insert(node.relPath).inserted else {
             warnFolderCycle(at: node.relPath, depth: depth)
             return worldFrame(of: node)
@@ -1564,9 +1638,11 @@ final class AppModel: ObservableObject {
         var frame = worldFrame(of: node)
         let children = autoGrowChildren(of: node)   // exclude far-flung outliers so one box can't balloon the folder
         if !children.isEmpty {
-            var bounds = effectiveFrame(of: children[0], visited: &visited, depth: depth + 1)
+            // Children recurse with asOpenCard:false — a collapsed CHILD still contributes only its
+            // collapsed header to the parent's footprint (it's the open extent OF THE TOP folder we want).
+            var bounds = legacyAutoGrownFrame(of: children[0], visited: &visited, depth: depth + 1, asOpenCard: false)
             for child in children.dropFirst() {
-                bounds = bounds.union(effectiveFrame(of: child, visited: &visited, depth: depth + 1))
+                bounds = bounds.union(legacyAutoGrownFrame(of: child, visited: &visited, depth: depth + 1, asOpenCard: false))
             }
             let pad = AppModel.folderPadding
             let needed = CGRect(x: bounds.minX - pad,
@@ -1576,21 +1652,6 @@ final class AppModel: ObservableObject {
             frame = frame.union(needed)
         }
         return frame
-    }
-
-    /// The rectangle a folder must cover to enclose its direct contents (children's displayed
-    /// bounds + padding + header), or nil when empty. Same region `effectiveFrame` auto-grows into;
-    /// the resize clamp uses it so a folder can't be drawn smaller than what it holds.
-    func contentsBounds(of node: BoardNode) -> CGRect? {
-        let children = autoGrowChildren(of: node)   // a far outlier shouldn't block resizing the folder smaller
-        guard let first = children.first else { return nil }
-        var bounds = effectiveFrame(of: first)
-        for child in children.dropFirst() { bounds = bounds.union(effectiveFrame(of: child)) }
-        let pad = AppModel.folderPadding
-        return CGRect(x: bounds.minX - pad,
-                      y: bounds.minY - pad - AppModel.folderHeaderHeight,
-                      width: bounds.width + 2 * pad,
-                      height: bounds.height + 2 * pad + AppModel.folderHeaderHeight)
     }
 
     /// Width a collapsed folder shrinks to: its header (title + the "N items" badge), never wider
@@ -2343,18 +2404,14 @@ final class AppModel: ObservableObject {
     }
 
     /// Build a resized frame from a fixed `anchor` corner and the dragged corner (`sign` is the
-    /// drag's direction from the anchor, ±1 per axis). Clamps so the box never goes below `minSize`
-    /// and — for a folder with contents — never shrinks past the children it holds. Resizing a
-    /// folder moves only its own frame; the contents stay put (no rescaling).
+    /// drag's direction from the anchor, ±1 per axis). Clamps so the box never goes below `minSize`.
+    /// A folder is now a viewport (folder-as-card): it resizes freely, even smaller than its
+    /// contents — no contents clamp. Resizing moves only its own frame; the contents stay put.
     func resizedFrame(for node: BoardNode, anchor: CGPoint, drag rawDrag: CGPoint,
                       sign: CGVector, minSize: CGSize) -> CGRect {
         // Keep the dragged corner on its own side of the anchor (never flip past it).
         var drag = CGPoint(x: sign.dx > 0 ? max(rawDrag.x, anchor.x) : min(rawDrag.x, anchor.x),
                            y: sign.dy > 0 ? max(rawDrag.y, anchor.y) : min(rawDrag.y, anchor.y))
-        if node.kind == .folder, let cb = contentsBounds(of: node) {
-            if sign.dx > 0 { drag.x = max(drag.x, cb.maxX) } else { drag.x = min(drag.x, cb.minX) }
-            if sign.dy > 0 { drag.y = max(drag.y, cb.maxY) } else { drag.y = min(drag.y, cb.minY) }
-        }
         // Enforce the minimum size, growing away from the fixed anchor.
         if abs(drag.x - anchor.x) < minSize.width  { drag.x = anchor.x + sign.dx * minSize.width }
         if abs(drag.y - anchor.y) < minSize.height { drag.y = anchor.y + sign.dy * minSize.height }
