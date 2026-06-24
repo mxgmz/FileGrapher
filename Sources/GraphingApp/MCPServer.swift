@@ -169,6 +169,10 @@ final class MCPServer {
                 guard model.connect(from: from, to: to) else {
                     return reply(.failure(ToolError("Could not link (same node, missing box, or already linked)")))
                 }
+                // Gravity (VISION §4 law 3): in the common create-then-link gesture, `from` is the fresh note.
+                // If this is its *only* edge it hasn't found its neighborhood yet — pull it beside its kin.
+                let firstLink = model.board.edges.filter { $0.from == from || $0.to == from }.count == 1
+                if firstLink, model.node(from)?.kind == .note { model.placeNearKin(newNode: from, anchor: to) }
                 reply(.success(Self.toolText("Linked \(from.uuidString) → \(to.uuidString) — wrote the [[wikilink]]")))
 
             case "canvas_move":
@@ -184,8 +188,9 @@ final class MCPServer {
                 }
                 let spokes = (args["spokeIds"] as? [Any] ?? []).compactMap { Self.uuid($0) }
                 guard !spokes.isEmpty else { return reply(.failure(ToolError("arrange needs a non-empty 'spokeIds'"))) }
-                model.arrangeRadial(hub: hub, spokes: spokes)
-                reply(.success(Self.toolText("Arranged \(spokes.count) spoke(s) radially around the hub.")))
+                // Minimal-motion (VISION §4 law 2): only nudge spokes that aren't already at their slot.
+                model.arrangeRadialMinimalMotion(hub: hub, spokes: spokes)
+                reply(.success(Self.toolText("Arranged \(spokes.count) spoke(s) radially around the hub (unchanged-enough spokes left put).")))
 
             case "canvas_expand", "canvas_collapse":
                 guard let id = Self.uuid(args["id"]), let target = model.node(id) else {
@@ -381,6 +386,86 @@ final class MCPServer {
             ],
         ],
     ]
+}
+
+// MARK: Cartographer laws (VISION-agent-cartographer.md §4) — gravity + minimal-motion
+//
+// These live as an `extension AppModel` in the same module so the Model.swift core stays untouched: both
+// are thin compositions of existing geometry (nearestFreeCenter / the push solver / worldFrame), never new
+// layout math. The MCP tools call them; the app gets them for free if it ever wants them.
+extension AppModel {
+    /// Gravity (law 3): a freshly-linked note should land *near its kin*, not at a scatter slot. Place
+    /// `newNode` at the nearest free center adjacent to `anchor`, reusing `nearestFreeCenter` so it never
+    /// overlaps an occupied slot. The seed sits one box-gap to the anchor's right (in world space); the
+    /// ring-scan finds the closest real gap from there. World→relative conversion goes through the same
+    /// chokepoint every write path uses, so nested folders stay correct.
+    func placeNearKin(newNode: UUID, anchor: UUID) {
+        guard let new = node(newNode), let kin = node(anchor) else { return }
+        let kinFrame = worldFrame(of: kin)
+        let gap = AppModel.gridStep
+        let seedWorld = CGPoint(x: kinFrame.maxX + gap + new.width / 2, y: kinFrame.midY)
+        let seedRelative = relativeCenter(seedWorld, inDir: new.parentRel)   // nearestFreeCenter reasons in parent-relative space
+        let free = nearestFreeCenter(for: newNode, near: seedRelative) ?? seedRelative
+        transaction { setPosition(newNode, to: free) }   // one ⌘Z reverses the gravity nudge
+    }
+
+    /// Minimal-motion (law 2): re-arrange spokes radially around `hub`, but **only move the ones that must
+    /// move** — a spoke already within `arrangeSettleRadius` of its computed slot is left exactly where it
+    /// is. Mirrors `AppModel.arrangeRadial`'s geometry; the one change is the skip-if-close guard. Spokes are
+    /// matched to their *nearest* target slot first so we don't reshuffle an already-tidy ring.
+    func arrangeRadialMinimalMotion(hub hubId: UUID, spokes spokeIds: [UUID]) {
+        guard node(hubId) != nil, !spokeIds.isEmpty else { return }
+        transaction {
+            setExpanded(hubId, true)
+            guard let hub = node(hubId) else { return }   // re-read: expanding can resize the card
+            let center = hub.center
+            let hubFrame = effectiveFrame(of: hub)
+            let hubReach = max(hubFrame.width, hubFrame.height) / 2
+            let spokeReach = spokeIds.compactMap { node($0) }.map { max($0.width, $0.height) / 2 }.max() ?? 0
+            let gap: CGFloat = 80
+            let clearance = hubReach + spokeReach + gap
+            let crowding = CGFloat(spokeIds.count) * (spokeReach * 2 + gap) / (2 * .pi)
+            let radius = max(clearance, crowding)
+            let slots = (0..<spokeIds.count).map { i -> CGPoint in
+                let angle = Double(i) / Double(spokeIds.count) * 2 * .pi - .pi / 2   // first slot at 12 o'clock
+                return CGPoint(x: center.x + radius * CGFloat(cos(angle)), y: center.y + radius * CGFloat(sin(angle)))
+            }
+            for (spoke, slot) in AppModel.assignToNearestSlots(spokeIds, slots, center: { self.node($0)?.center }) {
+                guard let current = node(spoke)?.center else { continue }
+                if hypot(slot.x - current.x, slot.y - current.y) > AppModel.arrangeSettleRadius {
+                    setPosition(spoke, to: slot)   // far enough to be worth moving; otherwise leave it put
+                    // ponytail: setPosition (== post-migration moveSubtree) — children store relative, so they ride along.
+                }
+            }
+            resolveOverlaps(movedId: hubId)
+        }
+    }
+
+    /// A spoke already this close (world units) to its target slot is "tidy enough" — leave it put rather
+    /// than nudge it. ~½ a grid step: small enough that the ring still reads even, big enough that a re-run
+    /// on an already-arranged hub is a no-op (no twitch). ponytail: a flat threshold is the first cut.
+    static let arrangeSettleRadius: CGFloat = 24
+
+    /// Greedily pair each spoke to its nearest free target slot (cheap reduction of total motion vs. a fixed
+    /// index→slot mapping). Pure + static so it's portable to the headless harness. `center` resolves a
+    /// spoke's current center; a spoke with no center falls back to a leftover slot in order.
+    static func assignToNearestSlots(_ spokes: [UUID], _ slots: [CGPoint],
+                                     center: (UUID) -> CGPoint?) -> [(UUID, CGPoint)] {
+        var remaining = Array(slots.enumerated())
+        var pairs: [(UUID, CGPoint)] = []
+        for spoke in spokes {
+            guard let here = center(spoke), let pick = remaining.enumerated().min(by: {
+                hypot($0.element.element.x - here.x, $0.element.element.y - here.y) <
+                hypot($1.element.element.x - here.x, $1.element.element.y - here.y)
+            }) else {
+                if !remaining.isEmpty { pairs.append((spoke, remaining.removeFirst().element)) }
+                continue
+            }
+            pairs.append((spoke, pick.element.element))
+            remaining.remove(at: pick.offset)
+        }
+        return pairs
+    }
 }
 
 /// A tool failure carrying a human-readable message (becomes the JSON-RPC error message).

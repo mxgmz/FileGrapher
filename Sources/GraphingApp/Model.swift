@@ -1958,8 +1958,9 @@ final class AppModel: ObservableObject {
     }
 
     /// Run a mutating action as a single undoable transaction (nestable).
-    /// Internal (not private) so sibling-file extensions like `FinderImport` can group their own
-    /// board + disk mutations into one undo step using the same engine.
+    /// Module-internal (not `private`) so same-module extensions — `FinderImport` (drag-in) and the
+    /// cartographer laws in `MCPServer.swift` — can bundle their board + disk mutations into one ⌘Z step
+    /// using the same engine every UI mutation already gets.
     func transaction(_ body: () -> Void) {
         if txnDepth == 0 { txnBefore = board; txnFileUndo = []; txnFileRedo = [] }
         txnDepth += 1
