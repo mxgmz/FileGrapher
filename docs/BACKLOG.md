@@ -67,8 +67,12 @@ folder-organization + smart expansion. Phasing is risk-ordered:
       **Visually verified by Max** (clip, scroll, routing, hit-test-after-scroll all good). User opts a folder
       into compact mode by resizing it down. *Deferred (agent-flagged): connector edges aren't clipped to the
       card; Quick Look peek anchors to the un-scrolled child position.*
-    - ⬜ **PR-3+** — compact default card size (folders start small, scroll-to-see-more) / scrollbar affordance
-      / edge-clipping + peek-offset polish.
+    - ✅ **PR-3 / #19 (S30) — card polish.** New folders already open compact (S29 retired auto-grow); added a
+      **Compact Card** menu action (`compactCard` → shrink a migration-bloated card to the compact default +
+      reset scroll, children stay put), faint **scroll-overflow thumbs** on an open card, intra-card
+      **connectors clipped** to the card border (`edgeClipScreen`/`CardClip`), and **Quick Look peek** anchored
+      to `displayedFrame` (scrolled position). Build + suite verified; UI eyeball owed. *Deferred ceiling:
+      cross-card-boundary edges aren't clipped.*
 - ⬜ **Phase 3 — Smart expansion**. Per-folder view memory; title→preview→full spectrum; learned pre-expand.
 
 ---
